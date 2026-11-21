@@ -2,6 +2,10 @@ package com.indoorpulse.presentation.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role
+import androidx.compose.material.icons.filled.Palette
+import com.indoorpulse.ui.theme.Appearance
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,7 +19,19 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.activity.compose.BackHandler
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.automirrored.filled.Accessible
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInParent
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -31,12 +47,16 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import com.indoorpulse.data.local.entity.BuildingEntity
 import com.indoorpulse.data.local.entity.NodeEntity
+import com.indoorpulse.data.local.entity.type
 import com.indoorpulse.data.local.entity.id
 import com.indoorpulse.data.local.entity.label
+import com.indoorpulse.domain.model.Coordinate
 import com.indoorpulse.presentation.ui.components.EmergencyFab
+import com.indoorpulse.presentation.ui.components.ArrivalCard
 import com.indoorpulse.presentation.ui.components.NavigationBanner
 import com.indoorpulse.presentation.ui.components.SearchBottomSheetContent
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -56,7 +76,9 @@ import com.indoorpulse.presentation.viewmodel.MapViewModel
 import com.indoorpulse.presentation.viewmodel.TrackingState
 import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.BorderStroke
@@ -71,22 +93,35 @@ import androidx.activity.result.contract.ActivityResultContracts
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(viewModel: MapViewModel) {
+fun MainScreen(
+    viewModel: MapViewModel,
+    discoveryLocation: android.location.Location? = null,
+    locationStatus: String? = null,
+    onFindNearby: (() -> Unit)? = null,
+    appearance: Appearance = Appearance.SYSTEM,
+    onAppearanceChange: ((Appearance) -> Unit)? = null
+) {
     val context = LocalContext.current
+    val colors = MaterialTheme.colorScheme
+    var showAppearance by rememberSaveable { mutableStateOf(false) }
     val jsonPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let { viewModel.importMapFromJson(context, it) }
     }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(viewModel, context) {
         viewModel.routeError.collect { errorMessage ->
-            Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
+            withContext(Dispatchers.Main.immediate) {
+                Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
+            }
         }
     }
 
     val isSurveyorMode by viewModel.isSurveyorMode.collectAsState()
     val isSosActive by viewModel.isSosActive.collectAsState()
     val activeDestination by viewModel.activeDestination.collectAsState()
+    val activeRoute by viewModel.activeRoute.collectAsState()
+    val arrival by viewModel.arrival.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val estimatedPosition by viewModel.estimatedPosition.collectAsState()
     val activeNodes by viewModel.activeNodes.collectAsState()
@@ -98,161 +133,105 @@ fun MainScreen(viewModel: MapViewModel) {
     val availableFloors by viewModel.availableFloors.collectAsState()
     val selectedNode by viewModel.selectedNode.collectAsState()
     val recenterTrigger by viewModel.recenterTrigger.collectAsState()
+    val exploreTrigger by viewModel.exploreTrigger.collectAsState()
     val canUndo by viewModel.canUndo.collectAsState()
     val canRedo by viewModel.canRedo.collectAsState()
     val transitInfo by viewModel.transitState.collectAsState()
-    val approachingBuilding by viewModel.approachingBuilding.collectAsState()
-    val nearExitNode by viewModel.nearExitNode.collectAsState()
+    val isAccessible by viewModel.accessibleMode.collectAsState()
     val trackingState by viewModel.trackingState.collectAsState()
     val stagedNode by viewModel.stagedNode.collectAsState()
-    var showManualOverrideDialog by remember { mutableStateOf(false) }
+    val maps by viewModel.buildingMaps.collectAsState()
+    val buildingId by viewModel.activeBuildingId.collectAsState()
+    val buildingName = maps.firstOrNull { it.building.buildingId == buildingId }?.building?.name
+    var openingId by rememberSaveable { mutableStateOf<String?>(null) }
+    var creating by rememberSaveable { mutableStateOf(false) }
+    var leaving by rememberSaveable { mutableStateOf(false) }
+    var searching by rememberSaveable(buildingId) { mutableStateOf(false) }
+    var showOverview by rememberSaveable(buildingId) { mutableStateOf(false) }
+    var routeFitTrigger by remember(buildingId) { mutableIntStateOf(0) }
+    var topLeftMapControls by remember { mutableStateOf(Rect.Zero) }
+    var topRightMapControls by remember { mutableStateOf(Rect.Zero) }
+    var navigationCardBounds by remember { mutableStateOf(Rect.Zero) }
+    var previewDestination by rememberSaveable(buildingId) { mutableStateOf<String?>(null) }
+    var previewAvoidsStairs by rememberSaveable(buildingId) { mutableStateOf(false) }
+    var previewPath by remember(buildingId) { mutableStateOf<List<NodeEntity>?>(null) }
+    LaunchedEffect(buildingId, previewDestination) {
+        val destinationId = previewDestination ?: return@LaunchedEffect
+        if (trackingState != TrackingState.INDOORS) return@LaunchedEffect
+        previewPath = viewModel.previewRoute(destinationId, previewAvoidsStairs)
+        if (previewPath == null) previewDestination = null
+    }
 
+    var following by remember { mutableStateOf(true) }
     var targetSyncX by remember { mutableStateOf(0f) }
     var targetSyncY by remember { mutableStateOf(0f) }
 
-    var selectedNodeType by remember { mutableStateOf("Junction") }
-    var showNamingDialog by remember { mutableStateOf(false) }
-    var nodeNameInput by remember { mutableStateOf("") }
+    var selectedNodeType by rememberSaveable { mutableStateOf("Waypoint") }
+    var showNamingDialog by rememberSaveable { mutableStateOf(false) }
+    var nodeNameInput by rememberSaveable { mutableStateOf("") }
 
-    var entryPoints by remember { mutableStateOf<List<NodeEntity>>(emptyList()) }
-    var isLoadingEntryPoints by remember { mutableStateOf(false) }
-
-    LaunchedEffect(approachingBuilding) {
-        val building = approachingBuilding
-        if (building != null) {
-            isLoadingEntryPoints = true
-            entryPoints = viewModel.getBuildingEntryPoints(building.buildingId)
-            isLoadingEntryPoints = false
-        } else {
-            entryPoints = emptyList()
+    val opening = maps.firstOrNull { it.building.buildingId == openingId }?.building
+    if (opening != null && trackingState == TrackingState.OUTDOORS && !creating) {
+        BuildingEntryDialog(opening, viewModel::getBuildingEntryPoints, onEnter = { node ->
+            viewModel.confirmBuildingEntry(opening.buildingId, node)
+            openingId = null
+        }, onDismiss = {
+            openingId = null
+        })
+    }
+    if (creating) CreateMapDialog(onCreate = { name, radius ->
+        viewModel.createNewBuilding(name, radius)
+        creating = false
+    }, onDismiss = { creating = false })
+    if (leaving) AlertDialog(
+        onDismissRequest = { leaving = false }, title = { Text("Leave this map?") },
+        text = { Text("Your mapped points are saved. Return to the building library?") },
+        confirmButton = { Button(onClick = { viewModel.confirmBuildingExit(); leaving = false }) { Text("Leave map") } },
+        dismissButton = { TextButton(onClick = { leaving = false }) { Text("Stay here") } }
+    )
+    if (searching && trackingState == TrackingState.INDOORS && !isSurveyorMode) {
+        ModalBottomSheet(onDismissRequest = { searching = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+            SearchBottomSheetContent(activeNodes, onPreview = { node ->
+                searching = false
+                previewAvoidsStairs = isAccessible
+                previewDestination = node.id
+            }) { node ->
+                searching = false
+                viewModel.selectNode(null)
+                viewModel.requestRoute(node.nodeId)
+            }
         }
     }
 
-    if (approachingBuilding != null) {
-        val building = approachingBuilding!!
-        AlertDialog(
-            onDismissRequest = { viewModel.approachingBuilding.value = null },
-            icon = {
-                Icon(
-                    imageVector = Icons.Default.LocationCity,
-                    contentDescription = "Building Detected",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(36.dp)
-                )
-            },
-            title = {
-                Text(
-                    text = "Approaching ${building.name}",
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.titleLarge
-                )
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "Select your entry door to calibrate indoor positioning:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    if (isLoadingEntryPoints) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator(modifier = Modifier.size(28.dp))
-                        }
-                    } else if (entryPoints.isEmpty()) {
-                        Text(
-                            text = "No dedicated entrance doors mapped for this building.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray
-                        )
-                        Button(
-                            onClick = {
-                                val defaultEntry = NodeEntity(
-                                    nodeId = "entry_default_${building.buildingId}",
-                                    floorId = "f1",
-                                    x = 0f,
-                                    y = 0f,
-                                    nodeType = "Building Entry",
-                                    name = "Main Entrance",
-                                    floorLevel = 0,
-                                    buildingId = building.buildingId
-                                )
-                                viewModel.confirmBuildingEntry(building.buildingId, defaultEntry)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Enter Building (Ground Floor)")
-                        }
-                    } else {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            entryPoints.forEach { entryNode ->
-                                OutlinedButton(
-                                    onClick = {
-                                        viewModel.confirmBuildingEntry(building.buildingId, entryNode)
-                                    },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(48.dp),
-                                    shape = RoundedCornerShape(12.dp),
-                                    colors = ButtonDefaults.outlinedButtonColors(
-                                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
-                                    )
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = entryNode.label,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Text(
-                                            text = "Floor L${entryNode.floorLevel}",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { viewModel.approachingBuilding.value = null }) {
-                    Text("Dismiss / Not Now")
-                }
-            }
-        )
+    if (trackingState == TrackingState.INDOORS) {
+        val path = previewPath
+        if (path != null) {
+            MapOverview(buildingName.orEmpty(), activeNodes, surveyorEdges,
+                route = remember(path) { path.map(NodeEntity::stackPoint) },
+                position = null,
+                onClose = {
+                    previewDestination = null
+                    previewPath = null
+                },
+                preview = path, avoidsStairs = previewAvoidsStairs)
+        } else if (showOverview) {
+            MapOverview(buildingName.orEmpty(), activeNodes, surveyorEdges,
+                route = activeRoute,
+                position = Coordinate(estimatedPosition.first, estimatedPosition.second, currentFloor),
+                onClose = { showOverview = false }, emergency = isSosActive)
+        }
     }
 
     if (showNamingDialog) {
         AlertDialog(
             onDismissRequest = { showNamingDialog = false },
-            title = { Text("Name Location") },
+            title = { Text("Add ${selectedNodeType.lowercase()}") },
             text = {
                 OutlinedTextField(
                     value = nodeNameInput,
                     onValueChange = { nodeNameInput = it },
-                    label = { Text("Location Name") }
+                    label = { Text("Name (optional)") },
+                    singleLine = true
                 )
             },
             confirmButton = {
@@ -272,9 +251,36 @@ fun MainScreen(viewModel: MapViewModel) {
         )
     }
 
+    if (showAppearance && onAppearanceChange != null) {
+        AlertDialog(
+            onDismissRequest = { showAppearance = false },
+            title = { Text("Appearance") },
+            text = {
+                Column {
+                    Appearance.entries.forEach { option ->
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(
+                                selected = option == appearance, role = Role.RadioButton,
+                                onClick = { onAppearanceChange(option) }
+                            ).padding(horizontal = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = option == appearance, onClick = null)
+                            Spacer(Modifier.width(12.dp))
+                            Text(option.label)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showAppearance = false }) { Text("Done") } }
+        )
+    }
+
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    val scaffoldState = rememberBottomSheetScaffoldState()
+    BackHandler(trackingState == TrackingState.INDOORS && !drawerState.isOpen && !searching && !leaving && stagedNode == null && !showNamingDialog) {
+        leaving = true
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -282,13 +288,13 @@ fun MainScreen(viewModel: MapViewModel) {
             ModalDrawerSheet {
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    "IndoorPulse Admin",
+                    "Map tools",
                     modifier = Modifier.padding(16.dp),
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleMedium
                 )
                 HorizontalDivider()
-                NavigationDrawerItem(
+                if (trackingState == TrackingState.INDOORS) NavigationDrawerItem(
                     label = { Text("Surveyor Mode") },
                     selected = isSurveyorMode,
                     onClick = {
@@ -298,7 +304,7 @@ fun MainScreen(viewModel: MapViewModel) {
                     badge = { Switch(checked = isSurveyorMode, onCheckedChange = null) }
                 )
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                NavigationDrawerItem(
+                if (trackingState == TrackingState.INDOORS) NavigationDrawerItem(
                     label = { Text("Export Map Backup") },
                     icon = { Icon(Icons.Default.Save, contentDescription = "Export") },
                     selected = false,
@@ -316,77 +322,58 @@ fun MainScreen(viewModel: MapViewModel) {
                         scope.launch { drawerState.close() }
                     }
                 )
+                if (onAppearanceChange != null) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    NavigationDrawerItem(
+                        label = { Text("Appearance") },
+                        icon = { Icon(Icons.Default.Palette, null) },
+                        badge = { Text(appearance.label, style = MaterialTheme.typography.labelMedium) },
+                        selected = false,
+                        onClick = {
+                            scope.launch {
+                                drawerState.close()
+                                showAppearance = true
+                            }
+                        }
+                    )
+                }
             }
         }
     ) {
-        BottomSheetScaffold(
-            scaffoldState = scaffoldState,
-            // CRITICAL FIX: Hide sheet if OUTDOORS OR if in Surveyor Mode
-            sheetPeekHeight = if (trackingState == TrackingState.OUTDOORS || isSurveyorMode) 0.dp else 80.dp,
-            sheetContainerColor = MaterialTheme.colorScheme.surface,
-            sheetContent = {
-                // Only show search if we are NOT currently routing and NOT in surveyor mode
-                if (activeDestination == null && !isSurveyorMode) {
-                    SearchBottomSheetContent(
-                        allNodes = activeNodes,
-                        onNodeSelected = { selectedNode ->
-                            // Dismiss keyboard/sheet and calculate Dijkstra path
-                            viewModel.requestRoute(selectedNode.id)
-                        }
-                    )
-                } else {
-                    Spacer(modifier = Modifier.height(1.dp)) // Empty dummy for Scaffold
-                }
-            },
+        Scaffold(
+            containerColor = colors.surface,
             topBar = {
                 TopAppBar(
                     title = {
-                        Text(
-                            text = if (isSosActive) "EMERGENCY MODE" else "IndoorPulse",
-                            fontWeight = FontWeight.Bold
-                        )
+                        Column {
+                            Text(buildingName.takeIf { trackingState == TrackingState.INDOORS } ?: "IndoorPulse",
+                                maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleLarge)
+                            if (trackingState == TrackingState.INDOORS) Text(
+                                if (isSosActive) "Exit route" else if (isSurveyorMode) "Survey · L$currentFloor" else "Navigate · L$currentFloor",
+                                style = MaterialTheme.typography.labelMedium)
+                        }
                     },
                     navigationIcon = {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "Menu", tint = Color.White)
+                            Icon(Icons.Default.Menu, contentDescription = "Menu")
                         }
                     },
                     actions = {
-                        val isAccessible by viewModel.accessibleMode.collectAsState()
-                        IconButton(
-                            onClick = { viewModel.toggleAccessibleMode() },
-                            modifier = Modifier
-                                .padding(end = 12.dp)
-                                .background(
-                                    color = if (isAccessible) Color(0xFF00C853) else Color(0x33FFFFFF),
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                        ) {
-                            Icon(Icons.Default.Accessible, contentDescription = "Accessible", tint = Color.White)
-                        }
-                        if (trackingState == TrackingState.OUTDOORS) {
-                            IconButton(onClick = { showManualOverrideDialog = true }) {
-                                Icon(
-                                    Icons.Default.LocationCity,
-                                    contentDescription = "Select Building",
-                                    tint = Color.White
-                                )
-                            }
-                        }
                         if (trackingState == TrackingState.INDOORS) {
-                            IconButton(onClick = { viewModel.confirmBuildingExit() }) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.ExitToApp,
-                                    contentDescription = "Exit Building",
-                                    tint = Color.White
-                                )
+                            var mapMenu by remember { mutableStateOf(false) }
+                            Box {
+                                IconButton(onClick = { mapMenu = true }) { Icon(Icons.Default.MoreVert, "Map options") }
+                                DropdownMenu(mapMenu, { mapMenu = false }) {
+                                    DropdownMenuItem(text = { Text("Leave map") }, onClick = { mapMenu = false; leaving = true })
+                                }
                             }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color(0xFF1A1A2E),
-                        titleContentColor = Color.White,
-                        actionIconContentColor = Color.White
+                        containerColor = if (isSosActive) Color(0xFF7C231C) else colors.surface,
+                        titleContentColor = if (isSosActive) Color.White else colors.onSurface,
+                        navigationIconContentColor = if (isSosActive) Color.White else colors.primary,
+                        actionIconContentColor = if (isSosActive) Color.White else colors.onSurface
                     )
                 )
             }
@@ -396,12 +383,13 @@ fun MainScreen(viewModel: MapViewModel) {
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
-                    .background(Color(0xFF1E1E1E)) // Dark Map Background
+                    .background(colors.background)
             ) {
                 if (trackingState == TrackingState.INDOORS) {
                     // 1. RENDER MAP CANVAS (using activeNodes instead of raw DB nodes)
                 MapCanvas(
                     uiState = uiState,
+                    emergencyRoute = isSosActive,
                     estimatedPosition = estimatedPosition,
                     isSurveyorMode = isSurveyorMode,
                     surveyorNodes = activeNodes,
@@ -411,6 +399,8 @@ fun MainScreen(viewModel: MapViewModel) {
                     selectedNode = selectedNode,
                     onNodeSelected = { viewModel.selectNode(it) },
                     recenterTrigger = recenterTrigger,
+                    exploreTrigger = exploreTrigger,
+                    onFollowingChanged = { following = it },
                     viewModel = viewModel,
                     onNodeLongClick = { clickedNode ->
                         viewModel.stageNodeForDeletion(clickedNode)
@@ -421,12 +411,15 @@ fun MainScreen(viewModel: MapViewModel) {
                     },
                     allNodes = activeNodes,
                     currentFloor = currentFloor,
-                    is3DMode = is3DMode,
-                    modifier = Modifier.fillMaxSize()
+                    is3DMode = isSurveyorMode && is3DMode,
+                    activeRoute = activeRoute,
+                    routeFitTrigger = routeFitTrigger,
+                    mapControlBounds = if (activeDestination == null) emptyList() else
+                        listOf(topLeftMapControls, topRightMapControls, navigationCardBounds).filter { it.width > 0f && it.height > 0f },
+                    modifier = Modifier.fillMaxSize().semantics { contentDescription = "Indoor map, floor L$currentFloor" }
                 )
 
-                // 2. THE GLASS CROSSHAIR (Only visible in Surveyor Mode)
-                if (isSurveyorMode) {
+                if (isSurveyorMode && !following) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -435,7 +428,7 @@ fun MainScreen(viewModel: MapViewModel) {
                         Icon(
                             imageVector = Icons.Default.Add,
                             contentDescription = "Center Crosshair",
-                            tint = Color.Red.copy(alpha = 0.7f),
+                            tint = colors.primary,
                             modifier = Modifier.size(36.dp)
                         )
                     }
@@ -443,21 +436,24 @@ fun MainScreen(viewModel: MapViewModel) {
 
                 // 3. CONTEXTUAL OVERLAYS
                 if (isSurveyorMode) {
-                    // Show raw telemetry ONLY to admins
-                    Text(
-                        text = "Pos: (%.2f, %.2f) | Heading: %.1f°".format(
-                            estimatedPosition.first,
-                            estimatedPosition.second,
-                            uiState.headingDegrees
-                        ),
-                        color = Color.Green,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier
-                            .padding(16.dp)
-                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                            .align(Alignment.TopStart)
-                    )
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        color = colors.surfaceContainerHigh,
+                        contentColor = colors.onSurface
+                    ) {
+                        Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                            val heading = if (uiState.hasHeading) "%.0f°".format(uiState.headingDegrees) else "Waiting for heading"
+                            val accuracy = uiState.headingAccuracyDegrees?.let { "  ±$it°" }.orEmpty()
+                            Text(heading + accuracy, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "X %.1f   Y %.1f m".format(estimatedPosition.first, estimatedPosition.second),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = colors.onSurfaceVariant
+                            )
+                        }
+                    }
+
 
                     // RENDER SURVEYOR HUD AT ABSOLUTE BOTTOM
                     Box(
@@ -474,6 +470,7 @@ fun MainScreen(viewModel: MapViewModel) {
                                 if (selectedNodeType == "Waypoint") {
                                     viewModel.forceDropNewNode("", selectedNodeType)
                                 } else {
+                                    nodeNameInput = ""
                                     showNamingDialog = true
                                 }
                             },
@@ -483,31 +480,66 @@ fun MainScreen(viewModel: MapViewModel) {
                                 viewModel.syncPositionTo(targetSyncX, targetSyncY)
                             },
                             canUndo = canUndo,
-                            canRedo = canRedo
+                            canRedo = canRedo,
+                            canSync = !following,
+                            origin = activeNodes.firstOrNull { it.nodeId == lastDroppedNodeId },
+                            suggestion = activeNodes.firstOrNull { it.nodeId == snapTargetNodeId }
                         )
                     }
                 } else {
-                    // 3. RENDER SOS FAB (Top Left) - Only if NOT currently navigating
-                    if (activeDestination == null) {
-                        Box(modifier = Modifier.align(Alignment.TopStart)) {
-                            EmergencyFab(
-                                isActive = isSosActive,
-                                onToggle = { viewModel.toggleSosMode(it) }
-                            )
+                    Column(Modifier.align(Alignment.TopStart).onGloballyPositioned { topLeftMapControls = it.boundsInParent() }.padding(12.dp)) {
+                        FilterChip(selected = isAccessible, onClick = viewModel::toggleAccessibleMode, label = { Text("Avoid stairs") })
+                        if (activeDestination == null && arrival == null) {
+                            EmergencyFab(isActive = isSosActive, onToggle = viewModel::toggleSosMode)
+                        }
+                    }
+                    if (activeDestination == null && arrival == null) {
+                        val destination = selectedNode
+                        if (destination != null) {
+                            Surface(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(12.dp), shape = RoundedCornerShape(18.dp)) {
+                                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(destination.label, style = MaterialTheme.typography.titleMedium)
+                                    Text("${destination.type} · L${destination.floorLevel}", style = MaterialTheme.typography.bodySmall)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Button(onClick = { viewModel.selectNode(null); viewModel.requestRoute(destination.id) }) { Text("Directions") }
+                                        TextButton(onClick = {
+                                            viewModel.setFloor(destination.floorLevel)
+                                            viewModel.syncPositionTo(destination.x, destination.y)
+                                            viewModel.recenterCamera()
+                                        }) { Text("Start here") }
+                                    }
+                                }
+                            }
+                        } else FilledTonalButton(
+                            onClick = { searching = true },
+                            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(16.dp).heightIn(min = 52.dp)
+                        ) {
+                            Icon(Icons.Default.Search, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Find a destination")
                         }
                     }
                 }
 
-                // 2. RENDER NAVIGATION BANNER (Top Center)
-                if (activeDestination != null) {
-                    Box(modifier = Modifier.align(Alignment.TopCenter)) {
+                val completed = arrival
+                val destination = activeDestination
+                if (completed != null) {
+                    Box(Modifier.align(Alignment.BottomCenter)) {
+                        ArrivalCard(
+                            destinationName = completed.destination.label,
+                            floor = completed.destination.floorLevel,
+                            isExit = completed.isExit,
+                            onDone = viewModel::dismissArrival,
+                            onLeave = { leaving = true }
+                        )
+                    }
+                } else if (destination != null) {
+                    Box(Modifier.align(Alignment.BottomCenter).onGloballyPositioned { navigationCardBounds = it.boundsInParent() }) {
                         NavigationBanner(
-                            destinationName = activeDestination!!.label,
-                            isEmergency = isSosActive,
-                            onCancel = {
-                                viewModel.clearRoute()
-                                if (isSosActive) viewModel.toggleSosMode(false)
-                            }
+                            destination.label, isSosActive, viewModel::clearRoute,
+                            onShowRoute = if (activeRoute.any { it.floor == currentFloor }) {
+                                { routeFitTrigger++ }
+                            } else null
                         )
                     }
                 }
@@ -515,10 +547,11 @@ fun MainScreen(viewModel: MapViewModel) {
                 // RIGHT-SIDE FLOATING CONTROLS (Floor Selector, 3D Button, Recenter Button)
                 Column(
                     modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(bottom = if (isSurveyorMode) 180.dp else 24.dp, end = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .align(Alignment.TopEnd)
+                        .onGloballyPositioned { topRightMapControls = it.boundsInParent() }
+                        .padding(top = 12.dp, end = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.End
                 ) {
                     // Filter out floors if standard user, or allow extended range for surveyor
                     val displayFloors = if (isSurveyorMode) {
@@ -529,38 +562,48 @@ fun MainScreen(viewModel: MapViewModel) {
                         availableFloors.sortedDescending() // HIGHEST TO LOWEST
                     }
 
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shadowElevation = 4.dp
-                    ) {
-                        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+                    var floorsExpanded by remember { mutableStateOf(false) }
+                    Box {
+                        FilledTonalButton(
+                            onClick = { floorsExpanded = true },
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Text("L$currentFloor ▾")
+                        }
+                        DropdownMenu(expanded = floorsExpanded, onDismissRequest = { floorsExpanded = false }) {
                             displayFloors.forEach { floor ->
-                                val isSelected = currentFloor == floor
-                                Box(
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .background(
-                                            if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent, 
-                                            CircleShape
-                                        )
-                                        .clickable { viewModel.setFloor(floor) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("L$floor", color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface)
-                                }
+                                DropdownMenuItem(text = { Text("Floor L$floor") }, onClick = {
+                                    if (currentFloor != floor) viewModel.setFloor(floor)
+                                    floorsExpanded = false
+                                })
                             }
                         }
                     }
-
-                    // 3D CAD Toggle
-                    FloatingActionButton(onClick = { viewModel.toggle3DMode() }) { 
-                        Icon(if (is3DMode) Icons.Default.ViewInAr else Icons.Default.Map, contentDescription = "Toggle 3D") 
+                    FilledTonalButton(
+                        onClick = { if (isSurveyorMode) viewModel.toggle3DMode() else showOverview = true },
+                        contentPadding = PaddingValues(horizontal = 12.dp)
+                    ) {
+                        if (!isSurveyorMode) {
+                            Icon(Icons.Default.ViewInAr, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("3D map")
+                        } else {
+                            Text(if (is3DMode) "2D" else "3D")
+                        }
                     }
-
-                    // Recenter Camera
-                    FloatingActionButton(onClick = { viewModel.recenterCamera() }) {
-                        Icon(Icons.Default.MyLocation, contentDescription = "Recenter")
+                    val cameraMode = when {
+                        !following -> "Free pan and rotate"
+                        isSurveyorMode && is3DMode -> "Centered on you"
+                        else -> "Following your heading"
+                    }
+                    FilledTonalButton(
+                        onClick = { if (following) viewModel.exploreMap() else viewModel.recenterCamera() },
+                        modifier = Modifier.semantics { stateDescription = cameraMode },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Icon(if (following) Icons.Default.Explore else Icons.Default.MyLocation, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (following) "Explore" else "Recenter", style = MaterialTheme.typography.labelMedium)
                     }
                 }
 
@@ -616,307 +659,23 @@ fun MainScreen(viewModel: MapViewModel) {
                     }
                 }
                 } else {
-                    OutdoorDashboard(
-                        viewModel = viewModel,
-                        onManualOverrideClick = { showManualOverrideDialog = true }
+                    BuildingLibrary(
+                        maps, onOpen = { openingId = it.buildingId }, onCreate = { creating = true },
+                        location = discoveryLocation, locationStatus = locationStatus, onFindNearby = onFindNearby
                     )
                 }
             }
         }
-    }
-
-    if (nearExitNode != null) {
-        ExitBuildingDialog(
-            nearExitNode = nearExitNode!!,
-            viewModel = viewModel,
-            onConfirmExit = { viewModel.confirmBuildingExit() },
-            onDismiss = { viewModel.resetExitDebounce() }
-        )
-    }
-
-    if (showManualOverrideDialog) {
-        ManualOverrideDialog(
-            viewModel = viewModel,
-            onDismiss = { showManualOverrideDialog = false }
-        )
     }
 
     if (stagedNode != null) {
         NodeEditDialog(
             node = stagedNode!!,
+            currentFloor = currentFloor,
             viewModel = viewModel,
             onDismiss = { viewModel.clearStagedNode() }
         )
     }
-}
-
-@Composable
-fun ExitBuildingDialog(
-    nearExitNode: NodeEntity,
-    viewModel: MapViewModel,
-    onConfirmExit: () -> Unit,
-    onDismiss: () -> Unit = { viewModel.resetExitDebounce() }
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                text = "Leaving the building?",
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.titleLarge
-            )
-        },
-        text = {
-            Text(
-                text = "You are near ${nearExitNode.label}. Do you want to end indoor navigation and switch to outdoor mode?",
-                style = MaterialTheme.typography.bodyMedium
-            )
-        },
-        confirmButton = {
-            Button(
-                onClick = onConfirmExit,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-            ) {
-                Text("Yes, Exit")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = { viewModel.resetExitDebounce() }) {
-                Text("Stay Indoors")
-            }
-        }
-    )
-}
-
-@Composable
-fun ManualOverrideDialog(
-    viewModel: MapViewModel,
-    onDismiss: () -> Unit
-) {
-    var buildings by remember { mutableStateOf<List<BuildingEntity>>(emptyList()) }
-    var selectedBuilding by remember { mutableStateOf<BuildingEntity?>(null) }
-    var entryPoints by remember { mutableStateOf<List<NodeEntity>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(false) }
-    var isAddingBuilding by remember { mutableStateOf(false) }
-    var newBuildingName by remember { mutableStateOf("") }
-    var newBuildingRadius by remember { mutableStateOf("100") }
-    val coroutineScope = rememberCoroutineScope()
-
-    LaunchedEffect(Unit) {
-        isLoading = true
-        buildings = viewModel.getAllBuildings()
-        isLoading = false
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Text(
-                text = if (selectedBuilding == null) "Select Building" else "Select Entry: ${selectedBuilding!!.name}",
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.titleLarge
-            )
-        },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (isLoading) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(modifier = Modifier.size(28.dp))
-                    }
-                } else if (selectedBuilding == null) {
-                    OutlinedButton(
-                        onClick = { isAddingBuilding = !isAddingBuilding },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Text(if (isAddingBuilding) "Cancel" else "➕ Add New Building")
-                    }
-
-                    if (isAddingBuilding) {
-                        OutlinedTextField(
-                            value = newBuildingName,
-                            onValueChange = { newBuildingName = it },
-                            label = { Text("Building Name") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
-                            value = newBuildingRadius,
-                            onValueChange = { newBuildingRadius = it },
-                            label = { Text("Geofence Radius (meters)") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
-                        )
-                        Button(
-                            onClick = {
-                                if (newBuildingName.isNotBlank()) {
-                                    viewModel.createNewBuilding(
-                                        newBuildingName,
-                                        newBuildingRadius.toFloatOrNull() ?: 100f
-                                    )
-                                    onDismiss()
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Save & Enter Building")
-                        }
-                    }
-
-                    Text(
-                        text = "Choose a building to enter manually:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (buildings.isEmpty()) {
-                        Text(
-                            text = "No buildings found in database.",
-                            color = Color.Gray,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    } else {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            buildings.forEach { building ->
-                                OutlinedButton(
-                                    onClick = {
-                                        selectedBuilding = building
-                                        coroutineScope.launch {
-                                            isLoading = true
-                                            entryPoints = viewModel.getBuildingEntryPoints(building.buildingId)
-                                            isLoading = false
-                                        }
-                                    },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .heightIn(min = 64.dp), // Dynamic height allowing expansion
-                                    shape = RoundedCornerShape(12.dp),
-                                    contentPadding = PaddingValues(16.dp)
-                                ) {
-                                    Column(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalAlignment = Alignment.Start
-                                    ) {
-                                        Text(
-                                            text = building.name,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            color = Color.White
-                                            // Explicitly omitting maxLines so it wraps naturally
-                                        )
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween
-                                        ) {
-                                            Text(
-                                                text = "Radius: ${building.geofenceRadius.toInt()}m",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = Color.Gray
-                                            )
-                                            Text(
-                                                text = "ID: ${building.buildingId.take(6)}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = Color.DarkGray
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    val building = selectedBuilding!!
-                    Text(
-                        text = "Select your entry door:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (entryPoints.isEmpty()) {
-                        Text(
-                            text = "No dedicated doors mapped. Enter at ground level.",
-                            color = Color.Gray,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Button(
-                            onClick = {
-                                val fallbackNode = NodeEntity(
-                                    nodeId = "entry_manual_${building.buildingId}",
-                                    floorId = "f1",
-                                    x = 0f,
-                                    y = 0f,
-                                    nodeType = "Building Entry",
-                                    name = "Main Entrance",
-                                    floorLevel = 0,
-                                    buildingId = building.buildingId
-                                )
-                                viewModel.manualOverride(building.buildingId, fallbackNode)
-                                onDismiss()
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("Enter Building (Ground Floor)")
-                        }
-                    } else {
-                        Column(
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            entryPoints.forEach { entryNode ->
-                                Button(
-                                    onClick = {
-                                        viewModel.manualOverride(building.buildingId, entryNode)
-                                        onDismiss()
-                                    },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(48.dp),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(entryNode.label, fontWeight = FontWeight.SemiBold)
-                                        Text("Floor L${entryNode.floorLevel}", style = MaterialTheme.typography.labelMedium)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {},
-        dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (selectedBuilding != null) {
-                    TextButton(onClick = { selectedBuilding = null }) {
-                        Text("Back")
-                    }
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("Cancel")
-                }
-            }
-        }
-    )
 }
 
 @Composable
@@ -930,190 +689,99 @@ fun SurveyorHUD(
     onSyncPosition: () -> Unit = {},
     modifier: Modifier = Modifier,
     canUndo: Boolean = true,
-    canRedo: Boolean = true
+    canRedo: Boolean = true,
+    canSync: Boolean = true,
+    origin: NodeEntity? = null,
+    suggestion: NodeEntity? = null
 ) {
-    val selectedNode by viewModel.selectedNode.collectAsState()
-    val isPortal = selectedNode != null && (
-        selectedNode!!.nodeType.equals("Stairs", ignoreCase = true) ||
-        selectedNode!!.nodeType.equals("Elevator", ignoreCase = true)
-    )
-
+    val selected by viewModel.selectedNode.collectAsState()
+    val node = selected
+    val portal = node?.nodeType in listOf("Stairs", "Elevator")
+    val target = node?.takeUnless { it.id == origin?.id } ?: suggestion
     Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(bottom = 32.dp, start = 16.dp, end = 16.dp),
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xFF2C2C2C),
-        shadowElevation = 8.dp
+        modifier = modifier.fillMaxWidth().padding(12.dp),
+        shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh, shadowElevation = 4.dp
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // ROW 1: Scrollable Node Types
-            val types = listOf("Waypoint", "Junction", "Room Door", "Washroom", "Stairs", "Elevator", "Emergency Exit", "Building Entry")
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                types.forEach { type ->
-                    FilterChip(
-                        selected = selectedNodeType == type,
-                        onClick = { onNodeTypeSelected(type) },
-                        label = { Text(type, style = MaterialTheme.typography.labelSmall) }
-                    )
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                when {
+                    origin != null && target != null -> "Link ${origin.label} → ${target.label}"
+                    origin != null -> "Continuing from ${origin.label}"
+                    node != null -> "Selected · ${node.label}"
+                    else -> "Stand at a landmark, then add a point."
+                },
+                style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.weight(1f)) {
+                    var typesOpen by remember { mutableStateOf(false) }
+                    OutlinedButton(onClick = { typesOpen = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text("$selectedNodeType ▾", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    DropdownMenu(typesOpen, { typesOpen = false }) {
+                        surveyNodeTypes.forEach { type ->
+                            DropdownMenuItem(text = { Text(type) }, onClick = { onNodeTypeSelected(type); typesOpen = false })
+                        }
+                    }
+                }
+                Button(onClick = onDropNode, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.AddLocation, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Add point")
                 }
             }
-
-            if (isPortal) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    OutlinedButton(onClick = { viewModel.extrudePortal(1) }) { Text("Push Up (L+1)") }
-                    Spacer(Modifier.width(8.dp))
-                    OutlinedButton(onClick = { viewModel.extrudePortal(-1) }) { Text("Push Down (L-1)") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                SurveyAction("Undo", Icons.AutoMirrored.Filled.Undo, canUndo, onUndo)
+                SurveyAction("Redo", Icons.AutoMirrored.Filled.Redo, canRedo, onRedo)
+                SurveyAction("Position", Icons.Default.MyLocation, canSync, onSyncPosition)
+                SurveyAction("Edit", Icons.Default.Edit, node != null) { node?.let(viewModel::stageNodeForDeletion) }
+                SurveyAction("Link", Icons.Default.Link, origin != null && target != null) {
+                    target?.let { viewModel.selectNode(it); viewModel.snapToNearestNode() }
                 }
             }
-
-            // ROW 2: Actions
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    IconButton(
-                        onClick = onSyncPosition,
-                        modifier = Modifier.background(Color.Red.copy(alpha = 0.2f), CircleShape).size(40.dp)
-                    ) {
-                        Icon(Icons.Default.MyLocation, contentDescription = "Sync", tint = Color.Red)
-                    }
-                    IconButton(
-                        onClick = { viewModel.undoLastNode() },
-                        enabled = canUndo,
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Undo", tint = if (canUndo) Color.White else Color.Gray)
-                    }
-                    IconButton(
-                        onClick = { viewModel.stageNodeForDeletion(selectedNode!!) },
-                        enabled = selectedNode != null,
-                        modifier = Modifier.size(40.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = "Edit Selected",
-                            tint = if (selectedNode != null) MaterialTheme.colorScheme.primary else Color.Gray
-                        )
-                    }
-                }
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedButton(
-                        onClick = { viewModel.snapToNearestNode() },
-                        shape = RoundedCornerShape(16.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp)
-                    ) {
-                        Icon(Icons.Default.Link, contentDescription = "Snap", modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Snap", style = MaterialTheme.typography.labelSmall)
-                    }
-
-                    Button(
-                        onClick = onDropNode,
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Icon(Icons.Default.AddLocation, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Drop")
-                    }
+            if (portal) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                    TextButton(onClick = { viewModel.extrudePortal(1) }) { Text("Extend up a floor") }
+                    TextButton(onClick = { viewModel.extrudePortal(-1) }) { Text("Extend down a floor") }
                 }
             }
         }
     }
 }
 
-@Composable
-fun OutdoorDashboard(
-    viewModel: MapViewModel,
-    onManualOverrideClick: () -> Unit
-) {
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val scale by infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1000),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "scale"
-    )
+private val surveyNodeTypes = listOf("Waypoint", "Junction", "Room Door", "Washroom", "Stairs", "Elevator", "Emergency Exit", "Building Entry")
 
+@Composable
+private fun RowScope.SurveyAction(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, enabled: Boolean, onClick: () -> Unit) {
+    val color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF1E1E1E))
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        Modifier.weight(1f).clickable(enabled = enabled, role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .heightIn(min = 48.dp).padding(vertical = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center
     ) {
-        Icon(
-            imageVector = Icons.Default.Explore,
-            contentDescription = "Outdoor Mode",
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier
-                .size(120.dp)
-                .scale(scale)
-        )
-        Spacer(modifier = Modifier.height(24.dp))
-        Text(
-            text = "Outdoor Mode Active: Scanning for Geofences...",
-            style = MaterialTheme.typography.titleMedium,
-            color = Color.White,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "Walk towards a registered entrance or select a building manually.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = Color.Gray,
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-        OutlinedButton(
-            onClick = onManualOverrideClick,
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.LocationCity,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("View Known Buildings / Manual Entry", fontWeight = FontWeight.Bold)
-        }
+        Icon(icon, contentDescription = null, modifier = Modifier.size(19.dp), tint = color)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = color)
     }
 }
 
 @Composable
 fun NodeEditDialog(
     node: NodeEntity,
+    currentFloor: Int,
     viewModel: MapViewModel,
     onDismiss: () -> Unit
 ) {
+    var rename by rememberSaveable(node.nodeId) { mutableStateOf(false) }
+    var name by rememberSaveable(node.nodeId, node.name) { mutableStateOf(node.name) }
+    var confirmDelete by rememberSaveable(node.nodeId) { mutableStateOf(false) }
+    if (confirmDelete) {
+        AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Delete ${node.label}?") },
+            text = { Text("This removes the point and its links from the map.") },
+            confirmButton = { TextButton(onClick = { viewModel.deleteNode(node); onDismiss() }) { Text("Delete point") } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Keep point") } })
+        return
+    }
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             shape = RoundedCornerShape(24.dp),
@@ -1125,6 +793,7 @@ fun NodeEditDialog(
         ) {
             Column(
                 modifier = Modifier
+                    .verticalScroll(rememberScrollState())
                     .padding(20.dp)
                     .fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -1136,12 +805,13 @@ fun NodeEditDialog(
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "ID: ${node.nodeId} | Floor: L${node.floorLevel}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.Gray
-                    )
+                    Text("Floor L${node.floorLevel}", style = MaterialTheme.typography.labelMedium)
+                    if (rename) {
+                        OutlinedTextField(name, { name = it }, label = { Text("Point name") }, singleLine = true)
+                        TextButton(onClick = { viewModel.renameNode(node, name); rename = false }, enabled = name.isNotBlank()) { Text("Save name") }
+                    } else {
+                        TextButton(onClick = { rename = true }) { Text("Rename point") }
+                    }
                 }
 
                 // Type selector
@@ -1151,7 +821,7 @@ fun NodeEditDialog(
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
-                    val types = listOf("Waypoint", "Junction", "Room Door", "Washroom", "Stairs", "Elevator", "Emergency Exit", "Building Entry")
+                    val types = surveyNodeTypes
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1173,7 +843,7 @@ fun NodeEditDialog(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         HorizontalDivider()
                         Text(
-                            text = "Retroactive Portal Link",
+                            text = "Link an existing portal",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -1207,37 +877,51 @@ fun NodeEditDialog(
 
                 HorizontalDivider()
 
-                // Actions: Delete Node (Red OutlinedButton), Resume Path & Close
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                OutlinedButton(
+                    onClick = {
+                        viewModel.selectNode(node)
+                        viewModel.snapToNearestNode()
+                        onDismiss()
+                    },
+                    modifier = Modifier.fillMaxWidth()
                 ) {
+                    Text("Link from Current Origin")
+                }
+                if (node.floorLevel == currentFloor) {
+                    OutlinedButton(onClick = {
+                        viewModel.syncPositionTo(node.x, node.y)
+                        viewModel.recenterCamera()
+                        onDismiss()
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Set my position here")
+                    }
+                    OutlinedButton(onClick = {
+                        viewModel.alignHeadingToward(node)
+                        onDismiss()
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Facing ${node.label} · Align heading")
+                    }
+                }
+                if (node.floorLevel != currentFloor) {
                     OutlinedButton(
                         onClick = {
-                            viewModel.deleteNode(node)
+                            viewModel.moveNodeToCurrentFloor(node)
                             onDismiss()
                         },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
-                        shape = RoundedCornerShape(12.dp)
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Delete Node")
+                        Text("Move Node to Floor L$currentFloor")
                     }
+                }
 
-                    OutlinedButton(onClick = { viewModel.resumePathFromNode(node); onDismiss() }) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text("Resume Path Here")
+                OutlinedButton(onClick = { viewModel.resumePathFromNode(node); onDismiss() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Resume path here")
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton(onClick = { confirmDelete = true }) {
+                        Text("Delete point", color = MaterialTheme.colorScheme.error)
                     }
-
-                    TextButton(onClick = onDismiss) {
-                        Text("Close")
-                    }
+                    Button(onClick = onDismiss) { Text("Done") }
                 }
             }
         }

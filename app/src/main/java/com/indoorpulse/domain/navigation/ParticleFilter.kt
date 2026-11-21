@@ -11,9 +11,7 @@ data class Particle(var x: Float, var y: Float, var weight: Float)
 
 class ParticleFilter(private val numParticles: Int = 1000) {
 
-    // The exact real-world compass degree that corresponds to "UP" on your screen.
-    // Set to 180f based on the X/Y inversion you reported.
-    private val MAP_NORTH_AZIMUTH = 180f
+
 
     private val random = Random()
     var particles = List(numParticles) { Particle(0f, 0f, 1f / numParticles) }
@@ -39,20 +37,10 @@ class ParticleFilter(private val numParticles: Int = 1000) {
         for (particle in particles) {
             val noisyStep = stepLength * (1.0f + (random.nextGaussian().toFloat() * 0.1f))
             
-            // 1. Translate World Space (True North) into Map Space (Screen Up)
-            var mapSpaceHeading = (heading - MAP_NORTH_AZIMUTH) % 360f
-            if (mapSpaceHeading < 0) mapSpaceHeading += 360f
-            
-            // 2. Inject Gaussian noise AFTER the frame translation
-            mapSpaceHeading += (random.nextGaussian().toFloat() * 5.0f)
-            val headingRadians = Math.toRadians(mapSpaceHeading.toDouble())
-            
-            // 3. PURE CANVAS MATH (+Y is Down). 
-            // If mapSpaceHeading is 0 (Up), X adds 0, Y subtracts step (moves Up on screen).
-            // CRITICAL FIX: The X-axis operator is now `-=` instead of `+=`.
-            // This perfectly mirrors Left and Right movement while keeping Up and Down intact.
-            particle.x -= (noisyStep * Math.sin(headingRadians)).toFloat()
-            particle.y -= (noisyStep * Math.cos(headingRadians)).toFloat()
+            val radians = Math.toRadians(heading + random.nextGaussian() * 5.0)
+            particle.x += (noisyStep * sin(radians)).toFloat()
+            particle.y += (noisyStep * cos(radians)).toFloat()
+
 
             if (constrainToGraph && edges.isNotEmpty() && nodesMap.isNotEmpty()) {
                 var minDistance = Float.MAX_VALUE
@@ -87,7 +75,7 @@ class ParticleFilter(private val numParticles: Int = 1000) {
             }
         }
 
-        resample()
+        if (constrainToGraph) resample()
     }
 
     private fun distanceToSegment(px: Float, py: Float, x1: Float, y1: Float, x2: Float, y2: Float): Float {
@@ -145,6 +133,10 @@ class ParticleFilter(private val numParticles: Int = 1000) {
         } else {
             Pair(0f, 0f)
         }
+    }
+
+    fun translate(dx: Float, dy: Float) {
+        particles.forEach { it.x += dx; it.y += dy }
     }
 
     fun forcePosition(newX: Float, newY: Float) {

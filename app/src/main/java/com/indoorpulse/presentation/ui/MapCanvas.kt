@@ -1,5 +1,6 @@
 package com.indoorpulse.presentation.ui
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -9,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -18,6 +21,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.withTransform
@@ -32,7 +38,9 @@ import com.indoorpulse.data.local.entity.NodeEntity
 import com.indoorpulse.data.local.entity.EdgeEntity
 
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalDensity
 import com.indoorpulse.data.local.entity.id
@@ -44,7 +52,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.StrokeCap
 import com.indoorpulse.domain.model.Coordinate
 import com.indoorpulse.domain.model.floorLevel
-import kotlin.math.hypot
 
 private fun getProjectedPoint(px: Float, py: Float, x1: Float, y1: Float, x2: Float, y2: Float): Pair<Float, Float> {
     val l2 = (x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2)
@@ -57,27 +64,27 @@ private fun distanceTo(x1: Float, y1: Float, x2: Float, y2: Float): Float {
     return Math.hypot((x2 - x1).toDouble(), (y2 - y1).toDouble()).toFloat()
 }
 
-fun findNodeAt(
-    clickOffset: Offset,
+internal fun findNodeAt(
+    tap: Offset,
     nodes: List<NodeEntity>,
-    canvasOffset: Offset,
-    scale: Float,
-    hitRadiusPx: Float = 100f
+    currentFloor: Int,
+    is3DMode: Boolean,
+    hitRadiusPx: Float,
+    project: (Float, Float, Int) -> Offset
 ): NodeEntity? {
-    return nodes.minByOrNull { node ->
-        val nodeScreenX = canvasOffset.x + (node.x * scale)
-        val nodeScreenY = canvasOffset.y - (node.y * scale)
-        val dx = clickOffset.x - nodeScreenX
-        val dy = clickOffset.y - nodeScreenY
-        dx * dx + dy * dy
-    }?.takeIf { node ->
-        val nodeScreenX = canvasOffset.x + (node.x * scale)
-        val nodeScreenY = canvasOffset.y - (node.y * scale)
-        val dx = clickOffset.x - nodeScreenX
-        val dy = clickOffset.y - nodeScreenY
-        val distance = Math.hypot(dx.toDouble(), dy.toDouble()).toFloat()
-        distance < 80f || distance <= hitRadiusPx
+    var closest: NodeEntity? = null
+    var bestDistance = Float.POSITIVE_INFINITY
+    for (node in nodes) {
+        if (!is3DMode && node.floorLevel != currentFloor) continue
+        val distance = (tap - project(node.x, node.y, node.floorLevel)).getDistance()
+        if (distance > hitRadiusPx) continue
+        val winsTie = node.floorLevel == currentFloor && closest?.floorLevel != currentFloor
+        if (distance < bestDistance || (distance == bestDistance && winsTie)) {
+            closest = node
+            bestDistance = distance
+        }
     }
+    return closest
 }
 
 @Composable
@@ -106,121 +113,58 @@ fun MapCanvas(
     currentHeading: Float = uiState.headingDegrees,
     currentFloor: Int = 0,
     is3DMode: Boolean = false,
-    activeRoute: List<Coordinate>? = null
+    activeRoute: List<Coordinate>? = null,
+    onFollowingChanged: (Boolean) -> Unit = {},
+    exploreTrigger: Long = 0L,
+    emergencyRoute: Boolean = false,
+    routeFitTrigger: Int = 0,
+    mapControlBounds: List<Rect> = emptyList()
 ) {
+    val colors = MaterialTheme.colorScheme
+    val routeColor = if (emergencyRoute) colors.error else colors.primary
+    val elevatorColor = stackPortalColor(StackPortal.ELEVATOR)
+    val stairsColor = stackPortalColor(StackPortal.STAIRS)
+    val route = activeRoute ?: uiState.activeRoute
+    val guiding = !isSurveyorMode && route.isNotEmpty()
+    val legs = remember(route, currentFloor) { routeLegsOnFloor(route, currentFloor) }
+    val floorRoutePoints = remember(legs) { legs.flatten() }
+    val turns = remember(legs) { legs.flatMap(::routeTurnPoints).map { Offset(it.x, it.y) }.toSet() }
+    val nextTransfer = remember(route, currentFloor) {
+        route.zipWithNext().firstOrNull { (from, to) -> from.floor == currentFloor && to.floor != currentFloor }
+    }
+    val endpoint = route.lastOrNull()?.takeIf { it.floor == currentFloor } ?: nextTransfer?.first
+    val endpointPoint = endpoint?.let { Offset(it.x, it.y) }
     val activeNodes = if (surveyorNodes.isNotEmpty()) surveyorNodes else allNodes
     val currentPosePosition = currentPose ?: estimatedPosition
-    val density = LocalDensity.current
+    val hitRadiusPx = maxOf(64f, with(LocalDensity.current) { 48.dp.toPx() })
 
     val currentNodes by rememberUpdatedState(activeNodes)
-    val currentEdges by rememberUpdatedState(surveyorEdges)
+    val nodesById = remember(activeNodes) { activeNodes.associateBy { it.nodeId } }
+    val nodesByFloor = remember(activeNodes, selectedNode?.nodeId) {
+        activeNodes.sortedByDescending { it.nodeId == selectedNode?.nodeId }.groupBy { it.floorLevel }
+    }
+    val connectedIds = remember(surveyorEdges) {
+        surveyorEdges.flatMap { listOf(it.fromNodeId, it.toNodeId) }.toSet()
+    }
     val currentIsSurveyorMode by rememberUpdatedState(isSurveyorMode)
     val currentOnNodeLongClick by rememberUpdatedState(onNodeLongClick)
     val currentViewModel by rememberUpdatedState(viewModel)
     val currentSelectedNode by rememberUpdatedState(selectedNode)
     val currentOnNodeSelected by rememberUpdatedState(onNodeSelected)
 
-    var currentScale by remember { mutableStateOf(scale) }
-    var currentOffset by remember { mutableStateOf(offset) }
+    var manualCamera by remember(is3DMode) { mutableStateOf(MapCamera(scale, offset, 0f, is3DMode)) }
+    var following by remember(is3DMode) { mutableStateOf(true) }
     var canvasSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
 
-    fun notifyCrosshair(
-        w: Int = canvasSize.width,
-        h: Int = canvasSize.height,
-        off: Offset = currentOffset,
-        sc: Float = currentScale
-    ) {
-        if (!is3DMode && w > 0 && h > 0 && sc > 0f) {
-            val mapX = (w / 2f - off.x) / sc
-            // CRITICAL FIX: Y-Up Cartesian inversion
-            val mapY = -(h / 2f - off.y) / sc
-            onCrosshairCoordinateChanged?.invoke(mapX, mapY)
-        }
-    }
+    LaunchedEffect(following) { onFollowingChanged(following) }
+    val liveFloor by rememberUpdatedState(currentFloor)
+    val onCrosshair by rememberUpdatedState(onCrosshairCoordinateChanged)
+    val recenterProgress = remember(is3DMode) { Animatable(1f) }
+    var recenterStart by remember(is3DMode) { mutableStateOf<MapCamera?>(null) }
+    var handledExplore by remember { mutableStateOf(exploreTrigger) }
+    var handledRouteFit by remember { mutableStateOf(0) }
+    var beforeFitScale by remember(is3DMode) { mutableStateOf<Float?>(null) }
 
-    LaunchedEffect(currentScale, currentOffset, canvasSize, is3DMode) {
-        notifyCrosshair()
-    }
-
-    fun project(x: Float, y: Float, floor: Int): Offset {
-        val px = x * currentScale
-        val py = -y * currentScale // Canvas Y-inversion
-        
-        return if (is3DMode) {
-            // Standard Isometric Math (Rotate 45 deg, tilt 30 deg)
-            val isoX = (px - py) * 0.866f // cos(30)
-            val isoY = (px + py) * 0.5f   // sin(30)
-            val zOffset = floor * 250f    // Visual gap between floors
-            Offset(currentOffset.x + isoX, currentOffset.y + isoY - zOffset)
-        } else {
-            Offset(currentOffset.x + px, currentOffset.y + py)
-        }
-    }
-
-    fun findNodeAt(tapOffset: Offset, candidateNodes: List<NodeEntity>): NodeEntity? {
-        if (is3DMode) {
-            val localTapX = (tapOffset.x - currentOffset.x) / currentScale
-            val localTapY = (tapOffset.y - currentOffset.y) / currentScale
-            val threshold = 80f / currentScale
-
-            return candidateNodes
-                .map { node ->
-                    val rawPos = project(node.x, node.y, node.floorLevel)
-                    val pos = Offset(
-                        (rawPos.x - currentOffset.x) / currentScale,
-                        (rawPos.y - currentOffset.y) / currentScale
-                    )
-                    val dist = hypot(localTapX - pos.x, localTapY - pos.y)
-                    Triple(node, dist, node.floorLevel == currentFloor)
-                }
-                .filter { (_, dist, _) -> dist <= threshold }
-                .minWithOrNull(
-                    compareBy<Triple<NodeEntity, Float, Boolean>> { (_, dist, _) -> dist }
-                        .thenByDescending { (_, _, isCurrentFloor) -> isCurrentFloor }
-                )
-                ?.first
-        } else {
-            val validPortals = listOf("Stairs", "Elevator", "Emergency Exit")
-            val nodesToSearch = candidateNodes.filter { 
-                it.floorLevel == currentFloor || 
-                (currentIsSurveyorMode && currentFloor > 0 && it.floorLevel == currentFloor - 1 && it.type in validPortals)
-            }
-            val hitRadius = maxOf(80f, with(density) { 160.dp.toPx() })
-            return nodesToSearch
-                .map { node ->
-                    val pos = project(node.x, node.y, node.floorLevel)
-                    val dx = tapOffset.x - pos.x
-                    val dy = tapOffset.y - pos.y
-                    val dist = hypot(dx.toDouble(), dy.toDouble()).toFloat()
-                    Triple(node, dist, node.floorLevel == currentFloor)
-                }
-                .filter { (_, dist, _) -> dist < 80f || dist <= hitRadius }
-                .minWithOrNull(
-                    compareBy<Triple<NodeEntity, Float, Boolean>> { (_, dist, _) -> dist }
-                        .thenByDescending { (_, _, isCurrentFloor) -> isCurrentFloor }
-                )
-                ?.first
-        }
-    }
-
-    LaunchedEffect(recenterTrigger) {
-        if (recenterTrigger > 0L) {
-            val cx = if (canvasSize.width > 0) canvasSize.width / 2f else 500f
-            val cy = if (canvasSize.height > 0) canvasSize.height / 2f else 500f
-            val px = currentPosePosition.first * currentScale
-            val py = -currentPosePosition.second * currentScale
-            val newOffset = if (is3DMode) {
-                val isoX = (px - py) * 0.866f
-                val isoY = (px + py) * 0.5f - (currentFloor * 250f)
-                Offset(cx - isoX, cy - isoY)
-            } else {
-                Offset(cx - px, cy - py)
-            }
-            currentOffset = newOffset
-            notifyCrosshair(off = newOffset)
-            onTransform?.invoke(currentScale, newOffset)
-        }
-    }
 
     val animatedX by animateFloatAsState(
         targetValue = currentPosePosition.first,
@@ -233,58 +177,126 @@ fun MapCanvas(
         label = "userY"
     )
 
-    var previousHeading by remember { mutableStateOf(uiState.headingDegrees) }
-    var currentHeadingTarget by remember { mutableStateOf(uiState.headingDegrees) }
-
-    val diff = (uiState.headingDegrees - previousHeading) % 360f
-    val shortestDiff = if (diff > 180f) diff - 360f else if (diff < -180f) diff + 360f else diff
-    currentHeadingTarget += shortestDiff
-    previousHeading = uiState.headingDegrees
-
-    val animatedHeading by animateFloatAsState(
-        targetValue = currentHeadingTarget,
-        animationSpec = tween(durationMillis = 150),
-        label = "heading"
-    )
+    var headingTarget by remember { mutableStateOf(currentHeading) }
+    LaunchedEffect(currentHeading) {
+        headingTarget += angleDelta(headingTarget, currentHeading)
+    }
+    val animatedHeading by animateFloatAsState(headingTarget, spring(stiffness = Spring.StiffnessMedium), label = "heading")
+    fun center() = Offset(canvasSize.width / 2f, canvasSize.height / 2f)
+    val camera by remember(is3DMode) {
+        derivedStateOf {
+            if (!following || canvasSize.width <= 0) {
+                manualCamera
+            } else {
+                val center = center()
+                val position = Offset(animatedX, animatedY)
+                val rotation = if (is3DMode) 0f else -animatedHeading
+                val start = recenterStart
+                val progress = recenterProgress.value
+                if (start == null || progress >= 1f) {
+                    manualCamera.copy(rotation = rotation).anchor(position, center, liveFloor)
+                } else {
+                    val anchor = start.pointAt(center, liveFloor)
+                    val blended = anchor + (position - anchor) * progress
+                    start.copy(
+                        scale = start.scale + (manualCamera.scale - start.scale) * progress,
+                        rotation = start.rotation + angleDelta(start.rotation, rotation) * progress
+                    )
+                        .anchor(blended, center, liveFloor)
+                }
+            }
+        }
+    }
+    LaunchedEffect(recenterTrigger, is3DMode) {
+        if (!following) {
+            recenterStart = camera
+            beforeFitScale?.let { manualCamera = manualCamera.copy(scale = it) }
+            beforeFitScale = null
+            recenterProgress.snapTo(0f)
+            following = true
+            recenterProgress.animateTo(1f, tween(durationMillis = 320))
+            recenterStart = null
+        }
+    }
+    LaunchedEffect(exploreTrigger) {
+        if (exploreTrigger != handledExplore) {
+            handledExplore = exploreTrigger
+            manualCamera = camera
+            following = false
+        }
+    }
+    val fitMargin = with(LocalDensity.current) { 24.dp.toPx() }
+    LaunchedEffect(routeFitTrigger) {
+        if (routeFitTrigger == handledRouteFit) return@LaunchedEffect
+        handledRouteFit = routeFitTrigger
+        val viewport = routeViewport(canvasSize, mapControlBounds, fitMargin) ?: return@LaunchedEffect
+        val points = floorRoutePoints.map { Offset(it.x, it.y) }
+        if (!guiding || points.isEmpty()) return@LaunchedEffect
+        val previous = camera
+        if (beforeFitScale == null) beforeFitScale = previous.scale
+        manualCamera = previous.fit(points + Offset(estimatedPosition.first, estimatedPosition.second), currentFloor, viewport)
+        following = false
+    }
+    fun project(x: Float, y: Float, floor: Int) = camera.project(x, y, floor)
+    fun pickNode(tap: Offset) = findNodeAt(tap, currentNodes, currentFloor, is3DMode, hitRadiusPx, ::project)
+    LaunchedEffect(is3DMode) {
+        snapshotFlow {
+            if (following || canvasSize.width <= 0) null else camera.pointAt(center(), liveFloor)
+        }.collect { point -> point?.let { onCrosshair?.invoke(it.x, it.y) } }
+    }
 
     val textMeasurer = rememberTextMeasurer()
+    val labels = remember(activeNodes, textMeasurer, colors.onSurface) {
+        activeNodes.filter { it.name.isNotBlank() && it.nodeType != "Waypoint" }.associate { node ->
+            node.nodeId to textMeasurer.measure(node.label, TextStyle(color = colors.onSurface, fontSize = 12.sp))
+        }
+    }
+    val transferLabel = remember(nextTransfer, activeNodes, textMeasurer, colors.onSurface) {
+        nextTransfer?.let { (from, to) ->
+            val node = activeNodes.firstOrNull { it.floorLevel == from.floor && it.x == from.x && it.y == from.y }
+            val name = node?.name?.takeIf { it.isNotBlank() } ?: StackPortal.from(from.type)?.label ?: "Continue"
+            textMeasurer.measure("$name → L${to.floor}", TextStyle(color = colors.onSurface, fontSize = 12.sp))
+        }
+    }
+    val labelOrder = remember(nodesByFloor, guiding, endpointPoint, turns) {
+        if (!guiding) nodesByFloor else nodesByFloor.mapValues { (_, nodes) ->
+            nodes.sortedBy { node ->
+                val at = Offset(node.x, node.y)
+                when {
+                    at == endpointPoint -> 0
+                    at in turns -> 1
+                    StackPortal.from(node.nodeType) != null -> 2
+                    else -> 3
+                }
+            }
+        }
+    }
 
     Canvas(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF1E1E1E))
+            .background(colors.surfaceContainerLowest)
             .onSizeChanged { size ->
                 canvasSize = size
                 onSizeChanged?.invoke(size)
-                notifyCrosshair(w = size.width, h = size.height)
             }
-            .pointerInput(Unit) {
-                detectTransformGestures { centroid, pan, zoom, _ ->
-                    val oldScale = currentScale
-                    currentScale = (currentScale * zoom).coerceIn(5f, 100f)
-                    
-                    // BULLETPROOF ZOOM MATH: 
-                    // Only apply focal shift if the scale actually changed.
-                    val actualZoom = currentScale / oldScale
-                    val newOffset = (currentOffset - centroid) * actualZoom + centroid + pan
-                    currentOffset = newOffset
-                    
-                    notifyCrosshair(off = newOffset, sc = currentScale)
-                    onTransform?.invoke(currentScale, newOffset)
+            .pointerInput(is3DMode, currentFloor) {
+                detectTransformGestures { centroid, pan, zoom, rotation ->
+                    manualCamera = camera.gesture(centroid, pan, zoom, rotation, currentFloor)
+                    following = false
+                    onTransform?.invoke(manualCamera.scale, manualCamera.origin)
                 }
             }
-            .pointerInput(Unit) {
+            .pointerInput(is3DMode, currentFloor, hitRadiusPx) {
                 detectTapGestures(
                     onTap = { tapOffset ->
-                        val candidateNodes = currentNodes.filter { if (is3DMode) true else it.floorLevel == currentFloor }
-                        val tappedNode = findNodeAt(tapOffset, candidateNodes)
+                        val tappedNode = pickNode(tapOffset)
                         currentOnNodeSelected?.invoke(tappedNode)
                         currentViewModel?.selectNode(tappedNode)
                     },
                     onLongPress = { clickOffset ->
                         if (currentIsSurveyorMode) {
-                            val candidateNodes = currentNodes.filter { if (is3DMode) true else it.floorLevel == currentFloor }
-                            val clickedNode = findNodeAt(clickOffset, candidateNodes)
+                            val clickedNode = pickNode(clickOffset)
                             if (clickedNode != null) {
                                 currentViewModel?.selectNode(clickedNode)
                                 if (currentOnNodeLongClick != null) {
@@ -298,20 +310,23 @@ fun MapCanvas(
                 )
             }
     ) {
-        if (canvasSize == androidx.compose.ui.unit.IntSize.Zero) {
-            canvasSize = androidx.compose.ui.unit.IntSize(size.width.toInt(), size.height.toInt())
-        }
 
-        // NO GLOBAL ROTATION OR SQUASHING HERE ANYMORE
         val floorsToDraw = if (is3DMode) {
-            activeNodes.map { it.floorLevel }.plus(currentFloor).distinct().sorted()
+            (nodesByFloor.keys + currentFloor).sorted()
         } else {
             listOf(currentFloor)
         }
 
+        val puckCenter = project(animatedX, animatedY, currentFloor)
+        val puckBounds = Rect(puckCenter, 14.dp.toPx())
+        val labelBounds = (mapControlBounds + puckBounds).toMutableList()
+        val mapViewport = Rect(Offset.Zero, size)
+        val endpointOnScreen = endpoint?.takeIf { guiding }?.let { project(it.x, it.y, currentFloor) }
+        if (endpointOnScreen != null) labelBounds += Rect(endpointOnScreen, 11.dp.toPx())
+        val projectedLegs = if (guiding) legs.map { leg -> leg.map { project(it.x, it.y, currentFloor) } } else emptyList()
+        val projectedRouteEdges = projectedLegs.flatMap { it.zipWithNext() }
         floorsToDraw.forEach { floor ->
-            val nodesOnFloor = activeNodes.filter { it.floorLevel == floor }
-            val nodeIdsOnFloor = nodesOnFloor.map { it.nodeId }.toSet()
+            val nodesOnFloor = nodesByFloor[floor].orEmpty()
 
             // Subtle floor plane boundary in 3D mode
             if (is3DMode) {
@@ -330,91 +345,36 @@ fun MapCanvas(
                 }
                 drawPath(
                     path = floorPath,
-                    color = Color.LightGray.copy(alpha = 0.05f)
+                    color = colors.surfaceContainerHigh.copy(alpha = 0.35f)
                 )
                 drawPath(
                     path = floorPath,
-                    color = if (floor == currentFloor) Color.Cyan.copy(alpha = 0.4f) else Color.Gray.copy(alpha = 0.2f),
+                    color = if (floor == currentFloor) colors.primary.copy(alpha = 0.55f) else colors.outlineVariant,
                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f)
                 )
                 drawText(
                     textMeasurer = textMeasurer,
                     text = "Floor L$floor",
                     topLeft = Offset(c4.x, c4.y - 25f),
-                    style = TextStyle(color = if (floor == currentFloor) Color.Cyan else Color.LightGray)
+                    style = TextStyle(color = if (floor == currentFloor) colors.primary else colors.onSurfaceVariant)
                 )
             }
 
             // 1. Draw Edges connected to this floor
-            currentEdges.forEach { edge ->
-                if (edge.fromNodeId in nodeIdsOnFloor && edge.toNodeId in nodeIdsOnFloor) {
-                    val fromNode = nodesOnFloor.find { it.nodeId == edge.fromNodeId }
-                    val toNode = nodesOnFloor.find { it.nodeId == edge.toNodeId }
-                    if (fromNode != null && toNode != null) {
-                        val startPos = project(fromNode.x, fromNode.y, fromNode.floorLevel)
-                        val endPos = project(toNode.x, toNode.y, toNode.floorLevel)
-                        drawLine(
-                            color = Color(0xFF708090), // Slate Gray
-                            start = startPos,
-                            end = endPos,
-                            strokeWidth = 6f
-                        )
-                    }
+            surveyorEdges.forEach { edge ->
+                val from = nodesById[edge.fromNodeId]
+                val to = nodesById[edge.toNodeId]
+                if (from?.floorLevel == floor && to?.floorLevel == floor) {
+                    drawLine(
+                        color = colors.outline.copy(alpha = if (guiding) 0.46f else 1f),
+                        start = project(from.x, from.y, floor),
+                        end = project(to.x, to.y, floor),
+                        strokeWidth = (if (guiding) 2 else 3).dp.toPx(),
+                        cap = StrokeCap.Round
+                    )
                 }
             }
 
-            // 2. Draw Active Route
-            val currentActiveRoute = activeRoute ?: uiState.activeRoute
-            if (floor == currentFloor && !isSurveyorMode && currentActiveRoute.isNotEmpty()) {
-                val px = estimatedPosition.first
-                val py = estimatedPosition.second
-
-                // Leash line from user to nearest current-floor node in route
-                val currentFloorNodes = currentActiveRoute.filter { it.floorLevel == currentFloor }
-                if (currentFloorNodes.isNotEmpty()) {
-                    val closest = currentFloorNodes.minByOrNull { n ->
-                        val dx = n.x - px
-                        val dy = n.y - py
-                        dx * dx + dy * dy
-                    }
-                    if (closest != null) {
-                        val userPos = project(px, py, currentFloor)
-                        val anchorPos = project(closest.x, closest.y, currentFloor)
-                        drawLine(
-                            color = Color.Cyan.copy(alpha = 0.6f),
-                            start = userPos,
-                            end = anchorPos,
-                            strokeWidth = 6f,
-                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(15f, 15f), 0f)
-                        )
-                    }
-                }
-
-                // Group the path into pairs (segments)
-                val segments = currentActiveRoute.zipWithNext()
-                val scale = 1f
-
-                segments.forEach { (nodeA, nodeB) ->
-                    // CRITICAL FIX: Only draw the cyan line if AT LEAST ONE of the nodes is on the current floor 
-                    // (This allows drawing the line up to the stairs), OR if we are in 3D mode.
-                    if (is3DMode || nodeA.floorLevel == currentFloor || nodeB.floorLevel == currentFloor) {
-                        
-                        // Do not draw vertical lines between floors in 2D mode
-                        if (!is3DMode && nodeA.floorLevel != nodeB.floorLevel) return@forEach
-                        
-                        val posA = project(nodeA.x, nodeA.y, nodeA.floorLevel)
-                        val posB = project(nodeB.x, nodeB.y, nodeB.floorLevel)
-                        
-                        drawLine(
-                            color = Color.Cyan,
-                            start = posA,
-                            end = posB,
-                            strokeWidth = 8f / scale,
-                            cap = StrokeCap.Round
-                        )
-                    }
-                }
-            }
 
             // 1. Draw Ghost Portals (Surveyor Mode Only)
             if (!is3DMode && isSurveyorMode && currentFloor > 0) {
@@ -429,7 +389,7 @@ fun MapCanvas(
                     
                     // Draw a dashed circle or semi-transparent marker to indicate a portal below
                     drawCircle(
-                        color = Color.Gray.copy(alpha = 0.4f),
+                        color = colors.outline.copy(alpha = 0.55f),
                         radius = 12f / scale,
                         center = pos,
                         style = Stroke(width = 2f / scale, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f)))
@@ -440,8 +400,8 @@ fun MapCanvas(
                         pos.x + (15f / scale),
                         pos.y,
                         android.graphics.Paint().apply {
-                            color = android.graphics.Color.GRAY
-                            alpha = 100
+                            color = colors.onSurfaceVariant.toArgb()
+                            alpha = 160
                             textSize = 24f / scale
                         }
                     )
@@ -454,10 +414,10 @@ fun MapCanvas(
                 val pos = project(node.x, node.y, node.floorLevel)
                 val scale = 1f
 
-                val isConnected = currentEdges.any { it.fromNodeId == node.nodeId || it.toNodeId == node.nodeId }
+                val isConnected = node.nodeId in connectedIds
                 if (!isConnected) {
                     drawCircle(
-                        color = androidx.compose.ui.graphics.Color.Red,
+                        color = colors.error.copy(alpha = if (guiding) 0.30f else 1f),
                         radius = 18f,
                         center = pos,
                         style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
@@ -467,7 +427,7 @@ fun MapCanvas(
                 // CRITICAL FIX: Ensure highlight only draws on the correct floor
                 if (currentSelectedNode?.id == node.id && currentSelectedNode?.floorLevel == currentFloor) {
                     drawCircle(
-                        color = Color.Yellow,
+                        color = colors.tertiary,
                         radius = 16f / scale,
                         center = pos,
                         style = Stroke(width = 4f / scale)
@@ -476,59 +436,96 @@ fun MapCanvas(
 
                 if (node.nodeType == "Waypoint" || node.name.isBlank()) {
                     drawCircle(
-                        color = Color.Gray,
-                        radius = 6f,
+                        color = colors.outline.copy(alpha = if (guiding) 0.37f else 1f),
+                        radius = if (guiding) 4f else 6f,
                         center = pos
                     )
                 } else {
                     val color = when (node.nodeType) {
-                        "Junction" -> Color.Red
-                        "Room Door" -> Color.Blue
-                        "Stairs" -> Color.Green
-                        "Washroom" -> Color(0xFF00BCD4)
-                        "Emergency Exit" -> Color.Red
-                        "Building Entry" -> Color(0xFF4CAF50)
-                        else -> Color.Yellow
+                        "Junction" -> colors.outline
+                        "Room Door", "Washroom" -> colors.secondary
+                        "Stairs" -> if (isSurveyorMode) colors.tertiary else stairsColor
+                        "Elevator" -> if (isSurveyorMode) colors.tertiary else elevatorColor
+                        "Emergency Exit" -> colors.error
+                        "Building Entry" -> colors.primary
+                        else -> colors.secondary
                     }
-                    val scale = 1f
-                    drawCircle(
-                        color = color,
-                        radius = 8f / scale,
-                        center = pos
-                    )
+                    val portal = StackPortal.from(node.nodeType).takeUnless { isSurveyorMode }
+                    if (portal != null) {
+                        drawPortal(portal, pos, color, colors.surfaceContainerLowest, 4.dp.toPx())
+                    } else {
+                        drawCircle(
+                            color = color.copy(alpha = if (guiding) 0.52f else 1f),
+                            radius = if (guiding) 5f else 8f,
+                            center = pos
+                        )
+                    }
+                }
+            }
 
-                    // CRITICAL FIX: Draw Text Pill Background
-                    val textToDraw = node.label
-                    val paint = android.graphics.Paint().apply { textSize = 30f / scale; isAntiAlias = true }
-                    val textWidth = paint.measureText(textToDraw)
-
-                    drawRect(
-                        color = Color.Black.copy(alpha = 0.6f),
-                        topLeft = Offset(pos.x + (10f / scale), pos.y - (25f / scale)),
-                        size = Size(textWidth + (10f / scale), 35f / scale)
-                    )
-
-                    drawContext.canvas.nativeCanvas.drawText(
-                        textToDraw,
-                        pos.x + (15f / scale),
-                        pos.y + (4f / scale),
-                        paint.apply { this.color = android.graphics.Color.WHITE }
+            if (guiding && floor == currentFloor) {
+                val nearest = floorRoutePoints.minByOrNull { point ->
+                    (Offset(point.x, point.y) - Offset(estimatedPosition.first, estimatedPosition.second)).getDistanceSquared()
+                }
+                if (nearest != null) {
+                    drawLine(
+                        routeColor.copy(alpha = 0.76f), puckCenter, project(nearest.x, nearest.y, currentFloor),
+                        2.5.dp.toPx(), StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 5.dp.toPx()))
                     )
                 }
+                for (leg in projectedLegs) {
+                    drawCasedRoute(leg, routeColor, colors.surfaceContainerLowest)
+                }
+                for (turn in turns) {
+                    val at = project(turn.x, turn.y, floor)
+                    drawCircle(colors.surfaceContainerLowest, 4.dp.toPx(), at)
+                    drawCircle(routeColor, 2.dp.toPx(), at)
+                }
+                if (endpoint != null && endpointOnScreen != null) {
+                    val portal = StackPortal.from(endpoint.type)
+                    val portalColor = when (portal) {
+                        StackPortal.ELEVATOR -> elevatorColor
+                        StackPortal.STAIRS -> stairsColor
+                        null -> routeColor
+                    }
+                    drawRouteEndpoint(endpointOnScreen, routeColor, colors.surfaceContainerLowest, portal, portalColor)
+                }
+            }
 
+            for (node in labelOrder[floor].orEmpty()) {
+                val label = if (guiding && nextTransfer != null &&
+                    node.floorLevel == nextTransfer.first.floor && node.x == nextTransfer.first.x && node.y == nextTransfer.first.y
+                ) transferLabel ?: labels[node.id] else labels[node.id]
+                if (label == null) continue
+                val at = project(node.x, node.y, node.floorLevel)
+                val important = guiding && (Offset(node.x, node.y) == endpointPoint || Offset(node.x, node.y) in turns)
+                val padding = 4.dp.toPx()
+                val gap = when {
+                    puckBounds.contains(at) -> 22.dp.toPx()
+                    important -> 13.dp.toPx()
+                    else -> 6.dp.toPx()
+                }
+                val bounds = mapLabelBounds(at, label.size.width + padding * 2, label.size.height + padding,
+                    gap, mapViewport, labelBounds, projectedRouteEdges, 5.dp.toPx()) ?: continue
+                labelBounds += bounds
+                val background = if (important) colors.surfaceContainerHighest else colors.surfaceContainerHigh
+                drawRoundRect(background, bounds.topLeft, bounds.size, CornerRadius(padding))
+                drawText(label, color = if (guiding && !important) colors.onSurfaceVariant else colors.onSurface,
+                    topLeft = bounds.topLeft + Offset(padding, padding / 2))
             }
 
             // 4. Draw Rubber-Band & Smart Snapping (Surveyor Mode Only)
             if (isSurveyorMode && floor == currentFloor && lastDroppedNodeId != null) {
                 val lastNode = currentNodes.find { it.nodeId == lastDroppedNodeId }
-                if (lastNode != null) {
+                val selectionVisible = selectedNode == null || is3DMode || selectedNode.floorLevel == currentFloor
+                if (lastNode != null && (is3DMode || lastNode.floorLevel == currentFloor) && selectionVisible) {
                     val startPos = project(lastNode.x, lastNode.y, lastNode.floorLevel)
 
                     // Priority 1: Manual Selection Override
                     if (selectedNode != null) {
                         val targetPos = project(selectedNode.x, selectedNode.y, selectedNode.floorLevel)
                         drawLine(
-                            color = androidx.compose.ui.graphics.Color.Blue,
+                            color = colors.secondary,
                             start = startPos,
                             end = targetPos,
                             strokeWidth = 6f,
@@ -538,10 +535,10 @@ fun MapCanvas(
                     // Priority 2: Proximity Suggestion
                     else if (snapTargetNodeId != null) {
                         val snapNode = currentNodes.find { it.nodeId == snapTargetNodeId }
-                        if (snapNode != null) {
+                        if (snapNode != null && (is3DMode || snapNode.floorLevel == currentFloor)) {
                             val targetPos = project(snapNode.x, snapNode.y, snapNode.floorLevel)
                             val isSameFloor = snapNode.floorLevel == currentFloor
-                            val snapColor = if (isSameFloor) androidx.compose.ui.graphics.Color.Yellow else androidx.compose.ui.graphics.Color.Magenta
+                            val snapColor = if (isSameFloor) colors.tertiary else colors.secondary
 
                             // Draw the Suggestion Ring
                             drawCircle(
@@ -562,7 +559,7 @@ fun MapCanvas(
                     } else {
                         val userCanvasPos = project(currentPosePosition.first, currentPosePosition.second, currentFloor)
                         drawLine(
-                            color = androidx.compose.ui.graphics.Color.Yellow,
+                            color = colors.tertiary,
                             start = startPos,
                             end = userCanvasPos,
                             strokeWidth = 4f,
@@ -574,22 +571,25 @@ fun MapCanvas(
 
             // 5. Draw Blue Dot (Only on current floor)
             if (floor == currentFloor) {
-                val puckPos = project(currentPosePosition.first, currentPosePosition.second, currentFloor)
-                drawCircle(color = Color.Blue, radius = 12.dp.toPx(), center = puckPos)
-
-                val visualHeading = (animatedHeading + 180f) % 360f
-                withTransform({
-                    rotate(degrees = (visualHeading + 180f) % 360f, pivot = puckPos)
-                }) {
-                    val arrowPath = androidx.compose.ui.graphics.Path().apply {
-                        moveTo(puckPos.x, puckPos.y - 35f)
-                        lineTo(puckPos.x + 25f, puckPos.y + 15f)
-                        lineTo(puckPos.x, puckPos.y + 5f)
-                        lineTo(puckPos.x - 25f, puckPos.y + 15f)
+                val puckPos = project(animatedX, animatedY, currentFloor)
+                val radius = 11.dp.toPx()
+                val radians = Math.toRadians(animatedHeading.toDouble())
+                val forward = project(animatedX + kotlin.math.sin(radians).toFloat(),
+                    animatedY + kotlin.math.cos(radians).toFloat(), currentFloor) - puckPos
+                val arrowAngle = Math.toDegrees(kotlin.math.atan2(forward.x, -forward.y).toDouble()).toFloat()
+                drawCircle(colors.primary.copy(alpha = 0.20f), radius * 1.8f, puckPos)
+                drawCircle(colors.surfaceContainerLowest, radius + 2.dp.toPx(), puckPos)
+                drawCircle(colors.primary, radius, puckPos)
+                withTransform({ rotate(degrees = arrowAngle, pivot = puckPos) }) {
+                    val arrowPath = Path().apply {
+                        moveTo(puckPos.x, puckPos.y - radius * 0.8f)
+                        lineTo(puckPos.x + radius * 0.58f, puckPos.y + radius * 0.48f)
+                        lineTo(puckPos.x, puckPos.y + radius * 0.2f)
+                        lineTo(puckPos.x - radius * 0.58f, puckPos.y + radius * 0.48f)
                         close()
                     }
-                    drawPath(path = arrowPath, color = Color.White)
-                    drawPath(path = arrowPath, color = Color.DarkGray, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
+                    drawPath(path = arrowPath, color = colors.onPrimary)
+
                 }
             }
         }
@@ -597,13 +597,13 @@ fun MapCanvas(
         // Draw Inter-floor connector edges in 3D Mode
         if (is3DMode) {
             surveyorEdges.forEach { edge ->
-                val fromNode = activeNodes.find { it.nodeId == edge.fromNodeId }
-                val toNode = activeNodes.find { it.nodeId == edge.toNodeId }
+                val fromNode = nodesById[edge.fromNodeId]
+                val toNode = nodesById[edge.toNodeId]
                 if (fromNode != null && toNode != null && fromNode.floorLevel != toNode.floorLevel) {
                     val startPos = project(fromNode.x, fromNode.y, fromNode.floorLevel)
                     val endPos = project(toNode.x, toNode.y, toNode.floorLevel)
                     drawLine(
-                        color = Color(0xFF00E5FF),
+                        color = colors.tertiary,
                         start = startPos,
                         end = endPos,
                         strokeWidth = 6f,

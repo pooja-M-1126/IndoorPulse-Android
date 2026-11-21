@@ -1,6 +1,5 @@
 *.iml
 .gradle
-/local.properties
 /.idea/caches
 /.idea/libraries
 /.idea/modules.xml
@@ -13,3 +12,37 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Local handoff, attachments and tool state
+/HANDOFF.md
+/.codex-attachments/
+/.kotlin/
+/.idea/deploymentTargetSelector.xml
+/.idea/adb.xml
+
+# Local APKs, screenshots, map backups and device logs
+/local/
+*.apk
+*.apks
+*.aab
+*.idsig
+*.log
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.key
+*.pk8
+*.pem
+key.properties
+keystore.properties
+signing.properties
+secrets.properties
+google-services.json
+adbkey
+adbkey.pub

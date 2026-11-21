@@ -21,7 +21,10 @@ class KinematicPDR : SensorEventListener {
     private val LOW_THRES = -0.35f  // MUST drop DOWN this hard (foot lift)
     private val WEINBERG_K = 0.55f 
     
-    var currentHeading = 0f
+    private val rotationMatrix = FloatArray(9)
+    var currentHeading: Float? = null
+        private set
+    var onHeadingChanged: ((Float, Int?) -> Unit)? = null
     var onStepDetected: ((stepLength: Float, heading: Float) -> Unit)? = null
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -33,11 +36,12 @@ class KinematicPDR : SensorEventListener {
                 hasGravity = true
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
-                val rotationMatrix = FloatArray(9)
                 SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                val orientation = FloatArray(3)
-                SensorManager.getOrientation(rotationMatrix, orientation)
-                currentHeading = (Math.toDegrees(orientation[0].toDouble()).toFloat() + 360f) % 360f
+                portraitHeading(rotationMatrix)?.let { heading ->
+                    currentHeading = heading
+                    val accuracy = event.values.getOrNull(4)?.takeIf { it.isFinite() && it >= 0f }
+                    onHeadingChanged?.invoke(heading, accuracy?.let { Math.round(Math.toDegrees(it.toDouble())).toInt() })
+                }
             }
             Sensor.TYPE_LINEAR_ACCELERATION -> {
                 if (!hasGravity) return
@@ -77,7 +81,7 @@ class KinematicPDR : SensorEventListener {
                         // Hard clamp to strictly enforce physical human limits
                         val finalStride = Math.max(0.4f, Math.min(0.85f, dynamicStride))
                         
-                        onStepDetected?.invoke(finalStride, currentHeading)
+                        currentHeading?.let { onStepDetected?.invoke(finalStride, it) }
                     }
                     
                     // Reset machine for the next step

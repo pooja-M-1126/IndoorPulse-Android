@@ -1,5 +1,7 @@
 package com.indoorpulse
 
+import androidx.compose.ui.geometry.Offset
+import com.indoorpulse.presentation.ui.findNodeAt
 import com.indoorpulse.data.local.entity.NodeEntity
 import com.indoorpulse.data.local.entity.type
 import com.indoorpulse.data.local.entity.id
@@ -176,29 +178,31 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun testNodeTapSelectionRadius() {
-        val n0 = NodeEntity(nodeId = "target", floorId = "f1", x = 10f, y = 10f, nodeType = "Waypoint", floorLevel = 1)
-        val n1 = NodeEntity(nodeId = "other", floorId = "f1", x = 20f, y = 20f, nodeType = "Waypoint", floorLevel = 1)
-        val currentFloorNodes = listOf(n0, n1)
+    fun pickSkipsOverlappingOffFloorNodesAndUsesPixelRadius() {
+        val ground = NodeEntity("D12", "f0", 1f, 2f, "Stairs", floorLevel = 0)
+        val upper = ground.copy(nodeId = "D21", floorId = "f1", floorLevel = 1)
+        val nodes = listOf(ground, upper)
+        for (zoom in listOf(5f, 100f)) {
+            fun project(x: Float, y: Float, floor: Int) = Offset(80f + x * zoom, 500f - y * zoom)
+            val center = project(upper.x, upper.y, upper.floorLevel)
+            assertEquals(ground, findNodeAt(center, nodes, 0, false, 64f, ::project))
+            assertEquals(upper, findNodeAt(center + Offset(64f, 0f), nodes, 1, false, 64f, ::project))
+            assertNull(findNodeAt(center + Offset(65f, 0f), nodes, 1, false, 64f, ::project))
+            assertNull(findNodeAt(center, nodes, 2, false, 64f, ::project))
+        }
+    }
 
-        val radiusThreshold = 3.0 // 3 meters (~60px)
-
-        // Tap within 2 meters of n0
-        val tapNearX = 11.0f
-        val tapNearY = 10.5f
-        val selectedNear = currentFloorNodes
-            .minByOrNull { Math.hypot((it.x - tapNearX).toDouble(), (it.y - tapNearY).toDouble()) }
-            ?.takeIf { Math.hypot((it.x - tapNearX).toDouble(), (it.y - tapNearY).toDouble()) < radiusThreshold }
-        assertNotNull(selectedNear)
-        assertEquals("target", selectedNear?.id)
-
-        // Tap far away (empty space)
-        val tapFarX = 0f
-        val tapFarY = 0f
-        val selectedFar = currentFloorNodes
-            .minByOrNull { Math.hypot((it.x - tapFarX).toDouble(), (it.y - tapFarY).toDouble()) }
-            ?.takeIf { Math.hypot((it.x - tapFarX).toDouble(), (it.y - tapFarY).toDouble()) < radiusThreshold }
-        assertNull(selectedFar)
+    @Test
+    fun pickIn3DUsesProjectedDistanceThenActiveFloorForTies() {
+        val ground = NodeEntity("D12", "f0", 0f, 0f, "Room Door", floorLevel = 0)
+        val upper = ground.copy(nodeId = "D21", floorId = "f1", floorLevel = 1)
+        fun project(x: Float, y: Float, floor: Int) = Offset(360f + x, 500f + y - 250f * floor)
+        val nodes = listOf(ground, upper)
+        val upperCenter = project(upper.x, upper.y, 1)
+        assertEquals(upper, findNodeAt(upperCenter, nodes, 0, true, 64f, ::project))
+        val overlapping = listOf(ground.copy(y = -250f), upper)
+        assertEquals(upper, findNodeAt(upperCenter, overlapping, 1, true, 64f, ::project))
+        assertEquals(ground.copy(y = -250f), findNodeAt(upperCenter, overlapping.reversed(), 0, true, 64f, ::project))
     }
 
     @Test

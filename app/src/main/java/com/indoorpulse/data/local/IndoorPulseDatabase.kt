@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.withTransaction
 import com.indoorpulse.data.local.dao.MapDao
 import com.indoorpulse.data.local.entity.BuildingEntity
 import com.indoorpulse.data.local.entity.EdgeEntity
@@ -18,6 +19,31 @@ import com.indoorpulse.data.local.entity.NodeEntity
 abstract class IndoorPulseDatabase : RoomDatabase() {
 
     abstract fun mapDao(): MapDao
+
+    suspend fun insertMap(building: BuildingEntity, nodes: List<NodeEntity>, edges: List<EdgeEntity>) {
+        withTransaction {
+            val dao = mapDao()
+            dao.insertBuildings(listOf(building))
+            dao.insertNodes(nodes)
+            dao.insertEdges(edges)
+        }
+    }
+
+    suspend fun removePoint(nodeId: String) {
+        withTransaction {
+            val dao = mapDao()
+            dao.deleteEdgesForNode(nodeId)
+            dao.deleteNode(nodeId)
+        }
+    }
+
+    suspend fun restorePoint(node: NodeEntity, edges: List<EdgeEntity>) {
+        withTransaction {
+            val dao = mapDao()
+            dao.insertNodes(listOf(node))
+            dao.insertEdges(edges)
+        }
+    }
 
     companion object {
         @Volatile

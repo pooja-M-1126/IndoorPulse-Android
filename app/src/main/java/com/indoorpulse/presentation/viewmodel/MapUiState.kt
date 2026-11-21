@@ -7,5 +7,7 @@ data class MapUiState(
     val headingDegrees: Float = 0f,
     val selectedDestinationNodeId: String? = null,
     val activeRoute: List<Coordinate> = emptyList(),
-    val statusMessage: String = "Ready"
+    val statusMessage: String = "Ready",
+    val hasHeading: Boolean = false,
+    val headingAccuracyDegrees: Int? = null
 )

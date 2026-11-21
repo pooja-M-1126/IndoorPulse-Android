@@ -1,6 +1,8 @@
 package com.indoorpulse.data.local.dao
 
 import androidx.room.Dao
+import androidx.room.Embedded
+import kotlinx.coroutines.flow.Flow
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -9,9 +11,23 @@ import com.indoorpulse.data.local.entity.EdgeEntity
 import com.indoorpulse.data.local.entity.FloorEntity
 import com.indoorpulse.data.local.entity.NodeEntity
 
+data class BuildingMapSummary(
+    @Embedded val building: BuildingEntity,
+    val pointCount: Int,
+    val floorCount: Int
+)
+
 @Dao
 @JvmSuppressWildcards
 interface MapDao {
+    @Query("""
+        SELECT buildings.*, COUNT(nodes.nodeId) AS pointCount,
+               COUNT(DISTINCT nodes.floorLevel) AS floorCount
+        FROM buildings LEFT JOIN nodes ON nodes.buildingId = buildings.buildingId
+        GROUP BY buildings.buildingId ORDER BY buildings.name COLLATE NOCASE
+    """)
+    fun observeBuildingMaps(): Flow<List<BuildingMapSummary>>
+
     // --- Building Queries ---
     @Query("SELECT * FROM buildings")
     suspend fun getAllBuildings(): List<BuildingEntity>
@@ -53,6 +69,12 @@ interface MapDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertEdges(edges: List<EdgeEntity>): List<Long>
+
+    @Query("UPDATE nodes SET nodeType = :type WHERE nodeId = :nodeId")
+    suspend fun setNodeType(nodeId: String, type: String): Int
+
+    @Query("UPDATE nodes SET name = :name WHERE nodeId = :nodeId")
+    suspend fun renameNode(nodeId: String, name: String): Int
 
     @Query("DELETE FROM nodes WHERE nodeId = :nodeId")
     suspend fun deleteNode(nodeId: String): Int
