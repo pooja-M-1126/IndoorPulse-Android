@@ -51,9 +51,11 @@ import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.IntSize
@@ -247,9 +249,22 @@ internal fun FloorStack(
         if (step != null || focusedFloors.isEmpty() && floors.size != 1) emptyList()
         else nodes.filter { it.name.isNotBlank() && (it.floorLevel in focusedFloors || floors.size == 1) }
     }
-    val placeLabels = remember(placesToLabel, textMeasurer) {
-        placesToLabel.sortedByDescending { StackPortal.from(it.nodeType) != null }
-            .associateWith { textMeasurer.measure(it.name, TextStyle(fontSize = 11.sp), maxLines = 1) }
+    val routeDestination = route.lastOrNull().takeIf { step == null }
+    val maxLabelWidth = with(density) { 140.dp.roundToPx().coerceAtLeast(1) }
+    val placeLabels = remember(placesToLabel, textMeasurer, selectedPortal, routeDestination, maxLabelWidth) {
+        placesToLabel.sortedBy { place ->
+            when {
+                place.nodeId == selectedPortal || routeDestination?.let {
+                    place.x == it.x && place.y == it.y && place.floorLevel == it.floor
+                } == true -> 0
+                StackPortal.from(place.nodeType) != null || place.nodeType == "Building Entry" || place.nodeType == "Emergency Exit" -> 1
+                place.nodeType == "Room Door" -> 2
+                else -> 3
+            }
+        }.associateWith {
+            textMeasurer.measure(it.name, TextStyle(fontSize = 11.sp), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                constraints = Constraints(maxWidth = maxLabelWidth))
+        }
     }
 
     Box(modifier.clip(RoundedCornerShape(24.dp)).background(colors.surfaceContainerLowest)) {
@@ -328,12 +343,26 @@ internal fun FloorStack(
             for (floor in orderedFloors) {
                 val corners = slabs.getValue(floor)
                 val focused = isFocused(floor)
+                val highlighted = step == null && floor in focusedFloors
                 val slab = slabPath(corners)
                 val border = if (focusedFloors.isNotEmpty() && focused) colors.primary else colors.outline
-                drawPath(slabPath(corners, 5.dp.toPx()), border.copy(alpha = if (focused) 0.24f else 0.12f))
+                val rimDepth = (if (highlighted) 7.dp else 4.dp).toPx()
+                if (step == null) {
+                    for (index in corners.indices) {
+                        val from = corners[index]
+                        val to = corners[(index + 1) % corners.size]
+                        if (to.x <= from.x) continue
+                        val drop = Offset(0f, rimDepth)
+                        drawPath(slabPath(listOf(from, to, to + drop, from + drop)),
+                            border.copy(alpha = if (highlighted) 0.43f else if (focused) 0.28f else 0.14f))
+                    }
+                } else {
+                    drawPath(slabPath(corners, 5.dp.toPx()), border.copy(alpha = if (focused) 0.24f else 0.12f))
+                }
                 drawPath(slab, (if (focusedFloors.isNotEmpty() && focused) colors.primaryContainer else colors.surfaceContainerHigh)
-                    .copy(alpha = if (focused) 0.86f else 0.52f))
-                drawPath(slab, border.copy(alpha = if (focused) 0.69f else 0.30f), style = Stroke(1.dp.toPx()))
+                    .copy(alpha = if (highlighted) 0.96f else if (focused) 0.86f else 0.43f))
+                drawPath(slab, border.copy(alpha = if (focused) 0.69f else 0.30f),
+                    style = Stroke((if (highlighted) 1.6.dp else 1.dp).toPx()))
                 val ink = colors.onSurfaceVariant.copy(alpha = when {
                     !focused -> 0.16f
                     route.isNotEmpty() -> 0.42f
@@ -343,9 +372,12 @@ internal fun FloorStack(
                     drawLine(ink, project(from), project(to), (if (focused) 2.5f else 1.5f).dp.toPx(), StrokeCap.Round)
                 }
                 for (node in pointsByFloor[floor].orEmpty()) {
-                    if (StackPortal.from(node.nodeType) == null) {
-                        drawCircle(ink, (if (focused) 3.2f else 1.8f).dp.toPx(), project(node.stackPoint()))
-                    }
+                    if (StackPortal.from(node.nodeType) != null) continue
+                    val at = project(node.stackPoint())
+                    if (highlighted && (node.nodeType == "Building Entry" || node.nodeType == "Emergency Exit")) {
+                        drawCircle(colors.surface, 6.dp.toPx(), at)
+                        drawCircle(if (node.nodeType == "Emergency Exit") colors.error else colors.primary, 4.dp.toPx(), at)
+                    } else drawCircle(ink, (if (focused) 3.2f else 1.8f).dp.toPx(), at)
                 }
             }
             for ((from, to) in connectors) {
@@ -393,6 +425,7 @@ internal fun FloorStack(
                 }
             }
             val labelBounds = mutableListOf<Rect>()
+            val labelViewport = Rect(0f, 0f, size.width, size.height).deflate(3.dp.toPx())
             for (floor in orderedFloors.asReversed()) {
                 val tag = floorTags.getValue(floor)
                 val focused = isFocused(floor)
@@ -408,10 +441,12 @@ internal fun FloorStack(
                 drawText(tag, color = if (focused) colors.onSecondaryContainer else colors.onSurfaceVariant, topLeft = anchor)
             }
             val marker = stepPoints.lastOrNull() ?: position
-            val destination = route.lastOrNull().takeIf { step == null }
+            val destination = routeDestination
             if (destination != null && destination.floor in visible && isFocused(destination.floor)) {
                 val portal = StackPortal.from(destination.type)
-                drawRouteEndpoint(project(destination), routeColor, colors.surfaceContainerLowest, portal, portalColor(portal))
+                val at = project(destination)
+                labelBounds += Rect(at, 11.dp.toPx())
+                drawRouteEndpoint(at, routeColor, colors.surfaceContainerLowest, portal, portalColor(portal))
             }
             if (marker != null && marker.floor in visible && isFocused(marker.floor)) {
                 val at = project(marker)
@@ -425,14 +460,13 @@ internal fun FloorStack(
                 }
             }
             for ((node, label) in placeLabels) {
-                val at = project(node.stackPoint()) + Offset(8.dp.toPx(), -label.size.height / 2f)
                 val padding = Offset(3.dp.toPx(), 2.dp.toPx())
-                val rect = Rect(at - padding, Size(label.size.width + padding.x * 2, label.size.height + padding.y * 2))
-                if (rect.left < 0 || rect.right > size.width || rect.top < 0 ||
-                    rect.bottom > size.height || labelBounds.any { it.overlaps(rect) }) continue
+                val rect = mapLabelBounds(project(node.stackPoint()), label.size.width + padding.x * 2,
+                    label.size.height + padding.y * 2, 10.dp.toPx(), labelViewport, labelBounds) ?: continue
                 labelBounds += rect
                 drawRoundRect(colors.surface.copy(alpha = 0.96f), rect.topLeft, rect.size, CornerRadius(5.dp.toPx()))
-                drawText(label, color = colors.onSurface, topLeft = at)
+                val portal = StackPortal.from(node.nodeType)
+                drawText(label, color = if (portal == null) colors.onSurface else portalColor(portal), topLeft = rect.topLeft + padding)
             }
         }
         if (showResetButton && (orbit != StackOrbit() || pan != Offset.Zero || zoom != 1f)) {

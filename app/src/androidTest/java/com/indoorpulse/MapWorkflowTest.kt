@@ -27,6 +27,7 @@ import androidx.room.Room
 import androidx.test.platform.app.InstrumentationRegistry
 import com.indoorpulse.data.local.IndoorPulseDatabase
 import com.indoorpulse.data.local.DEMO_MAP_ID
+import com.indoorpulse.data.local.LARGE_DEMO_MAP_ID
 import com.indoorpulse.data.local.ensureDemoMap
 import com.indoorpulse.data.local.dao.BuildingMapSummary
 import com.indoorpulse.data.local.entity.BuildingEntity
@@ -37,6 +38,7 @@ import com.indoorpulse.domain.usecase.FindShortestPathUseCase
 import com.indoorpulse.presentation.ui.MainScreen
 import com.indoorpulse.presentation.ui.FloorStackLayout
 import com.indoorpulse.presentation.ui.nearbyMaps
+import com.indoorpulse.presentation.ui.routePreviewSteps
 import com.indoorpulse.presentation.ui.stackPoint
 import com.indoorpulse.presentation.viewmodel.MapViewModel
 import com.indoorpulse.ui.theme.IndoorPulseTheme
@@ -304,6 +306,47 @@ class MapWorkflowTest {
         click("Find a destination")
         click("Room 104")
         waitFor("NAVIGATING TO:")
+    }
+
+    @Test fun largerDemoSeedsBesideExistingMapsAndPreviewsAnElevatorRoute() {
+        runBlocking {
+            val dao = db.mapDao()
+            val original = BuildingEntity(DEMO_MAP_ID, "Demo Learning Centre", 0.0, 0.0, 0f)
+            val existing = NodeEntity("edited_demo", "f0", 2f, 0f, "Building Entry", "Edited entry", buildingId = DEMO_MAP_ID)
+            db.insertMap(original, listOf(existing), emptyList())
+            val savedNodes = dao.getNodesByBuilding("annex")
+            db.ensureDemoMap()
+            val installedDemo = dao.getNodesByBuilding(LARGE_DEMO_MAP_ID)
+            assertEquals(62, installedDemo.size)
+            db.ensureDemoMap()
+            assertEquals(installedDemo.toSet(), dao.getNodesByBuilding(LARGE_DEMO_MAP_ID).toSet())
+            assertEquals(listOf(existing), dao.getNodesByBuilding(DEMO_MAP_ID))
+            assertEquals(savedNodes.toSet(), dao.getNodesByBuilding("annex").toSet())
+        }
+        click("Demo Innovation Centre")
+        click("Main Entrance")
+        waitFor("Navigate · L0")
+        click("Avoid stairs")
+        val firstTransfer = ui.runOnIdle {
+            val path = checkNotNull(viewModel.findShortestPath("${LARGE_DEMO_MAP_ID}_0_entry", "${LARGE_DEMO_MAP_ID}_3_room_east"))
+            assertTrue(path.none { it.nodeType == "Stairs" })
+            routePreviewSteps(path).indexOfFirst { it.title == "Take the elevator to L1" }
+        }
+        assertTrue(firstTransfer >= 0)
+        click("Find a destination")
+        ui.onNodeWithText("Room, place or floor").performTextInput("Observation Studio")
+        ui.onNodeWithContentDescription("Preview route to Observation Studio, L3").performClick()
+        waitFor("Route preview")
+        repeat(firstTransfer) { click("Next") }
+        waitFor("Take the elevator to L1")
+        ui.onNodeWithContentDescription("Close route preview").performClick()
+        click("3D map")
+        chooseOverviewFloor("Floor L3")
+        ui.onNodeWithContentDescription("3D building map, floor L3").assertIsDisplayed()
+        ui.onNodeWithText("East Elevator").assertIsDisplayed()
+        capture("innovation-centre-focused", dialog = true)
+        ui.onNodeWithContentDescription("Close 3D map").performClick()
+        waitFor("Navigate · L0")
     }
 
     @Test fun threeDimensionalOverviewRotationDoesNotChangeNavigationFloor() {

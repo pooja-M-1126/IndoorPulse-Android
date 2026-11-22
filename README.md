@@ -23,6 +23,8 @@ Open the app on Android 10 or later. The fictional **Demo Learning Centre** is b
 3. Tap **Done**, open **3D map**, and drag to orbit. Tap the elevator marker to inspect its linked floors. Open the floor selector to adjust spacing or focus a level.
 4. Back on the map, tap the destination’s name to start live guidance. From the demo entrance, **Find exit** can immediately report **At the mapped exit**, since the entrance is an eligible exit and you start there.
 
+For a larger walkthrough, open **Demo Innovation Centre → Main Entrance** and preview **Observation Studio** on L3 with **Avoid stairs** enabled. In **3D map**, select a floor to read room names and inspect the stair and elevator connections. This map has five floors, including a basement.
+
 ## How it works
 
 ```mermaid
@@ -51,7 +53,7 @@ The main entry points are the [Compose screens and renderers](app/src/main/java/
 
 1. Clone the [IndoorPulse Android repository](https://github.com/rizwanhanda/IndoorPulse-Android) using Android Studio’s **Get from VCS** and open the project root.
 2. Install the SDK platform in **SDK Manager**, select the bundled Gradle JDK, and sync the project. The first sync downloads dependencies. Android Studio creates `local.properties` with `sdk.dir`. For command-line builds, point `JAVA_HOME` to the Gradle JDK and ensure the SDK path is configured.
-3. Select the **app** run configuration and an emulator or device with API 29 or later, then click **Run**. Room creates its database and loads the fictional demo during startup. No application credentials or separate data download are required.
+3. Select the **app** run configuration and an emulator or device with API 29 or later, then click **Run**. Room creates its database and loads the two fictional demos during startup. No application credentials or separate data download are required.
 
 Run from the repository root in Windows PowerShell.
 

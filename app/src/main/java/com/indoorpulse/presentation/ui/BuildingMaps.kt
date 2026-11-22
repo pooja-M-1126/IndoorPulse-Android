@@ -2,6 +2,7 @@ package com.indoorpulse.presentation.ui
 
 import android.location.Location
 import com.indoorpulse.data.local.DEMO_MAP_ID
+import com.indoorpulse.data.local.isDemoMap
 import com.indoorpulse.data.sensor.isUsableForDiscovery
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -43,7 +44,8 @@ internal fun BuildingLibrary(
     onFindNearby: (() -> Unit)? = null
 ) {
     val nearby = remember(maps, location) { nearbyMaps(maps, location) }
-    val demo = maps.firstOrNull { it.building.buildingId == DEMO_MAP_ID }
+    val demos = maps.filter { isDemoMap(it.building.buildingId) }
+        .sortedBy { it.building.buildingId != DEMO_MAP_ID }
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface),
         contentPadding = PaddingValues(20.dp),
@@ -77,9 +79,14 @@ internal fun BuildingLibrary(
                     Text("Create map")
                 }
             }
-            if (demo != null) BuildingCard("Try demo map", "Demo Learning Centre · 2 floors", BuildingCardStyle.DEMO) { onOpen(demo.building) }
         }
-        items(maps.filter { it.building.buildingId != DEMO_MAP_ID }, key = { it.building.buildingId }) { map ->
+        items(demos, key = { it.building.buildingId }) { map ->
+            val isShortDemo = map.building.buildingId == DEMO_MAP_ID
+            val title = if (isShortDemo) "Try demo map" else map.building.name
+            val subtitle = if (isShortDemo) "Demo Learning Centre · ${map.floorCount} floors" else map.coverageLabel()
+            BuildingCard(title, subtitle, BuildingCardStyle.DEMO) { onOpen(map.building) }
+        }
+        items(maps.filterNot { isDemoMap(it.building.buildingId) }, key = { it.building.buildingId }) { map ->
             BuildingCard(map.building.name, map.coverageLabel()) { onOpen(map.building) }
         }
     }
@@ -146,7 +153,7 @@ internal fun nearbyMaps(maps: List<BuildingMapSummary>, location: Location?): Li
     val distance = FloatArray(1)
     return maps.mapNotNull { map ->
         val building = map.building
-        if (map.pointCount == 0 || building.buildingId == DEMO_MAP_ID ||
+        if (map.pointCount == 0 || isDemoMap(building.buildingId) ||
             (building.centerLat == 0.0 && building.centerLng == 0.0) ||
             building.centerLat !in -90.0..90.0 || building.centerLng !in -180.0..180.0 ||
             !building.geofenceRadius.isFinite() || building.geofenceRadius < fix.accuracy
