@@ -98,3 +98,61 @@ Repository verification, documentation verification, and initial static source-c
 Thirteen functional test cases have been prepared for future execution. All observations reflect the actual verification performed, without claiming unexecuted tests as successful.
 
 Existing application source code was not modified during this documentation contribution.
+## Actual Build and Unit Testing Results
+
+### Verification Date
+24 November 2026
+
+### Environment Configuration
+- Operating System: Windows 11
+- Java: JDK 17
+- Gradle: 9.8.0
+- Kotlin: 2.4.10
+- Gradle User Home: D:\GradleHome
+- Additional virtual memory configured on D drive.
+
+### Android Build Verification
+- Build command: assembleDebug
+- Build status: SUCCESSFUL
+- Build duration: 1 minute 59 seconds
+- Total actionable tasks: 38
+- APK generated: app-debug.apk
+- APK size: 64,327,990 bytes
+
+### Unit Testing Results
+- Test command: testDebugUnitTest
+- Test class: com.indoorpulse.ExampleUnitTest
+- Total tests: 18
+- Passed: 18
+- Failed: 0
+- Skipped: 0
+- Success rate: 100%
+- Gradle execution time: 50 seconds
+- Test report duration: 3.055 seconds
+
+### Relevant Mapping Test Coverage
+- Node selection radius
+- Normal waypoint placement
+- Same-floor node validation
+- Cross-floor connection validation
+- Vertical meshing and edge alignment
+- Smart portal snapping
+- Floor-aware nearest-neighbor filtering
+
+### Technical Troubleshooting
+- Resolved insufficient disk space during build by relocating Gradle storage to D drive.
+- Configured additional Windows virtual memory.
+- Limited Gradle workers and used in-process Kotlin compilation.
+- Successfully completed the Android build and existing unit test suite without modifying application source code.
+
+### Testing Limitations
+The 18 existing unit tests were executed and verified successfully. The 13 independently designed functional test cases remain pending manual execution. Complete end-to-end subsystem functionality has not yet been verified.
+
+### Evidence
+- Android-Build-Success.png
+- Android-Unit-Tests.png
+- Android-Test-Report.png
+- Android-Test-Details-1.png
+- Android-Test-Details-2.png
+
+Evidence screenshots are maintained separately in the local project evidence folder.
