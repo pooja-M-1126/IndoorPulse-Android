@@ -54,3 +54,15 @@ The main branch remains unchanged by this individual documentation work.
 ## 6. Implementation Status
 
 The existing mapping implementation is under review. Feature availability and testing results will be documented after verification.
+## Contribution Scope and Acknowledgement
+
+The original application, algorithms, source code and existing unit tests were developed by the project leader and respective team contributors.
+
+This individual contribution consists of AI-assisted documentation, existing source-code review, test case preparation, environment configuration, build verification and execution of existing unit tests.
+
+The documented subsystem requirements and proposed test cases do not establish that every feature has been implemented or verified.
+
+No authorship of the original application source code or existing unit tests is claimed.
+
+The latest verification results are recorded in Testing-Log.md. Individual documentation commits are maintained on a personal GitHub fork.
+
